@@ -1,0 +1,55 @@
+name: Windows checks
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+    inputs:
+      artifacts:
+        description: Attach local Windows build artifacts to this run
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.20.0
+          cache: npm
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install pinned tools
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal --component rustfmt,clippy
+          rustup override set 1.99.1
+          ./scripts/Install-DevTools.ps1
+      - name: Build
+        shell: pwsh
+        run: |
+          if ($env:BUILD_INSTALLER -eq 'true') { ./scripts/Build.ps1 -Installer }
+          else { ./scripts/Build.ps1 }
+        env:
+          BUILD_INSTALLER: ${{ inputs.artifacts }}
+      - name: Install isolated Chromium
+        shell: pwsh
+        run: |
+          npm.cmd install --no-save --package-lock=false playwright@1.65.1
+          npx.cmd playwright install chromium
+      - name: Integration and UI checks
+        shell: pwsh
+        run: ./scripts/Test.ps1 -Browser
+      - uses: actions/upload-artifact@v7
+        if: github.event_name == 'workflow_dispatch' && inputs.artifacts
+        with:
+          name: homeproxy-windows-local-build
+          path: dist/
+          if-no-files-found: error

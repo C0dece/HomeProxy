@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "HomeProxy Browser",
+  "version": "0.1.0",
+  "description": "Маршрутизация сайтов через локальный HomeProxy Agent.",
+  "minimum_chrome_version": "124",
+  "icons": { "64": "icon.png" },
+  "action": { "default_title": "HomeProxy Browser", "default_popup": "popup.html", "default_icon": "icon.png" },
+  "background": { "service_worker": "background.js", "type": "module" },
+  "permissions": ["proxy", "storage", "alarms", "activeTab", "webRequest", "declarativeNetRequestWithHostAccess"],
+  "host_permissions": ["http://*/*", "https://*/*"]
+}

@@ -1,0 +1,7 @@
+diff --git a/experimental/libbox/log.go b/experimental/libbox/log.go
+--- a/experimental/libbox/log.go
++++ b/experimental/libbox/log.go
+@@ -64,0 +65,3 @@ func saveConfigSnapshot(configContent string) {
++	if !sPowerReportEnabled {
++		return
++	}

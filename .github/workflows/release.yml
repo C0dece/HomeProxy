@@ -1,0 +1,169 @@
+name: Publish signed release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Numeric version, for example 0.2.1
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: homeproxy-stable-release
+  cancel-in-progress: false
+
+env:
+  RELEASE_VERSION: ${{ inputs.version }}
+
+jobs:
+  windows:
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.20.0
+          cache: npm
+      - name: Build signed Windows artifacts
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.HOMEPROXY_WINDOWS_SIGNING_KEY }}
+          HOMEPROXY_WINDOWS_PUBLIC_KEY: ${{ vars.HOMEPROXY_WINDOWS_PUBLIC_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          if ($env:RELEASE_VERSION -notmatch '^\d+\.\d+\.\d+$') { throw 'Supply a numeric release version.' }
+          if (!$env:TAURI_SIGNING_PRIVATE_KEY -or !$env:HOMEPROXY_WINDOWS_PUBLIC_KEY) { throw 'Windows keys are missing.' }
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup override set 1.99.1
+          ./scripts/Install-DevTools.ps1
+          $key = Join-Path $env:RUNNER_TEMP 'tauri.pub'
+          $env:HOMEPROXY_WINDOWS_PUBLIC_KEY.Trim() | Set-Content $key -Encoding utf8NoBOM
+          $feed = "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download"
+          ./scripts/Build.ps1 -Installer -Version $env:RELEASE_VERSION -WindowsDirectory dist/release-windows `
+            -WindowsUpdateEndpoint "$feed/windows-{channel}.json" -WindowsUpdatePublicKey $key
+          Copy-Item dist/homeproxy-server.exe,dist/homeproxy-verify-release.exe -Destination dist/release-windows
+          Copy-Item dist/admin -Destination dist/release-windows -Recurse
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-windows
+          path: dist/release-windows/
+          if-no-files-found: error
+
+  android:
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-2025
+    timeout-minutes: 55
+    strategy:
+      matrix:
+        arch: [aarch64, x86_64]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.20.0
+          cache: npm
+      - uses: actions/setup-java@v5
+        with:
+          distribution: microsoft
+          java-version: '17'
+      - name: Install the Android toolchain
+        shell: pwsh
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          if ($env:RELEASE_VERSION -notmatch '^\d+\.\d+\.\d+$') { throw 'Supply a numeric release version.' }
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup override set 1.99.1
+          rustup target add "$env:ARCH-linux-android"
+          ./scripts/Install-DevTools.ps1
+          $manager = Get-ChildItem (Join-Path $env:ANDROID_HOME 'cmdline-tools') -Filter sdkmanager.bat -File -Recurse | Select-Object -First 1
+          & $manager.FullName 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0' 'ndk;30.0.16248370'
+      - name: Build signed Android APK
+        shell: pwsh
+        env:
+          ARCH: ${{ matrix.arch }}
+          ANDROID_KEYSTORE: ${{ secrets.HOMEPROXY_ANDROID_KEYSTORE }}
+          HOMEPROXY_ANDROID_KEY_PASSWORD: ${{ secrets.HOMEPROXY_ANDROID_PASSWORD }}
+          HOMEPROXY_RELEASE_PUBLIC_KEY: ${{ vars.HOMEPROXY_RELEASE_PUBLIC_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (!$env:ANDROID_KEYSTORE -or !$env:HOMEPROXY_ANDROID_KEY_PASSWORD -or !$env:HOMEPROXY_RELEASE_PUBLIC_KEY) { throw 'Android signing keys are missing.' }
+          $key = Join-Path $env:RUNNER_TEMP 'release.pub'
+          $store = Join-Path $env:RUNNER_TEMP 'homeproxy.p12'
+          $env:HOMEPROXY_RELEASE_PUBLIC_KEY.Trim() | Set-Content $key -Encoding utf8NoBOM
+          [IO.File]::WriteAllBytes($store, [Convert]::FromBase64String($env:ANDROID_KEYSTORE))
+          $env:HOMEPROXY_ANDROID_KEY_PASSWORD = $env:HOMEPROXY_ANDROID_KEY_PASSWORD.Trim()
+          $feed = "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download"
+          $ndk = Join-Path $env:ANDROID_HOME 'ndk/30.0.16248370'
+          try {
+            ./scripts/Build-Android.ps1 -Target $env:ARCH -Ndk $ndk -Version $env:RELEASE_VERSION -SigningKeystore $store `
+              -OutputDirectory dist/release-android -ReleasePublicKey $key -UpdateManifest "$feed/release.json" -UpdateSignature "$feed/release.sig"
+          } finally { Remove-Item -LiteralPath $store -ErrorAction SilentlyContinue }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-android-${{ matrix.arch }}
+          path: dist/release-android/*.apk
+          if-no-files-found: error
+
+  publish:
+    needs: [windows, android]
+    runs-on: windows-2025
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.20.0
+          cache: npm
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-windows
+          path: dist/release-windows
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-android-*
+          merge-multiple: true
+          path: dist/release-android
+      - name: Sign manifests and publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_PRIVATE_KEY: ${{ secrets.HOMEPROXY_RELEASE_PRIVATE_KEY }}
+          BROWSER_PRIVATE_KEY: ${{ secrets.HOMEPROXY_BROWSER_PRIVATE_KEY }}
+          HOMEPROXY_RELEASE_PUBLIC_KEY: ${{ vars.HOMEPROXY_RELEASE_PUBLIC_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          if (!$env:RELEASE_PRIVATE_KEY -or !$env:BROWSER_PRIVATE_KEY -or !$env:HOMEPROXY_RELEASE_PUBLIC_KEY) { throw 'Publishing keys are missing.' }
+          $tag = "v$env:RELEASE_VERSION"
+          $latest = gh release list --limit 1 --exclude-drafts --exclude-pre-releases --json tagName --jq '.[0].tagName'
+          if ($latest -and [version]$env:RELEASE_VERSION -le [version]$latest.TrimStart('v')) { throw 'Release versions must increase.' }
+          npm.cmd ci --no-audit --no-fund
+          $manager = Get-ChildItem (Join-Path $env:ANDROID_HOME 'cmdline-tools') -Filter sdkmanager.bat -File -Recurse | Select-Object -First 1
+          & $manager.FullName 'build-tools;36.0.0'
+          $aapt = Join-Path $env:ANDROID_HOME 'build-tools/36.0.0/aapt2.exe'
+          $ssl = Join-Path $env:ProgramFiles 'Git/usr/bin/openssl.exe'
+          $private = Join-Path $env:RUNNER_TEMP 'release.pem'
+          $public = Join-Path $env:RUNNER_TEMP 'release.pub'
+          $browser = Join-Path $env:RUNNER_TEMP 'browser.pem'
+          try {
+            $env:RELEASE_PRIVATE_KEY.Trim() | Set-Content $private -Encoding utf8NoBOM
+            $env:HOMEPROXY_RELEASE_PUBLIC_KEY.Trim() | Set-Content $public -Encoding utf8NoBOM
+            $env:BROWSER_PRIVATE_KEY.Trim() | Set-Content $browser -Encoding utf8NoBOM
+            ./scripts/Package-Release.ps1 -Version $env:RELEASE_VERSION -Repository $env:GITHUB_REPOSITORY `
+              -WindowsPayload dist/release-windows -AndroidPayload dist/release-android -ReleasePrivateKey $private `
+              -ReleasePublicKey $public -BrowserPrivateKey $browser -Aapt $aapt -OpenSsl $ssl
+            $files = @(Get-ChildItem dist/publish -File | ForEach-Object FullName)
+            gh release create $tag @files --draft --target $env:GITHUB_SHA --title "HomeProxy $env:RELEASE_VERSION" --generate-notes
+            gh release edit $tag --draft=false --latest
+          } finally { Remove-Item -LiteralPath $private,$browser -ErrorAction SilentlyContinue }

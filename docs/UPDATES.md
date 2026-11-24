@@ -1,0 +1,53 @@
+# Обновления
+
+Выпуски публикуются в [GitHub Releases](https://github.com/C0dece/HomeProxy/releases/latest). Workflow `Publish signed release` запускается из `main` с новой версией. Он собирает Windows, Android ARM64 и x86_64, проверяет подписанный манифест и публикует единый выпуск. Приватные ключи хранятся в GitHub Actions Secrets. В клиенты встраиваются открытые ключи, а адреса пакетов указывают на конкретный тег.
+
+Первый установщик с настроенным источником берите из GitHub Releases. Windows и Android скачивают последующие выпуски оттуда после проверки подписей. Установка требует подтверждения в приложении или в Android. Android-сборки с другим сертификатом требуют отдельного перехода на официальный APK.
+
+Правила и прокси синхронизируются автоматически. homeproxy-verify-release.exe проверяет Ed25519-подпись манифеста, выбирает более новую совместимую версию и сверяет размер и SHA-256 перед записью файла. Поддержаны локальный файл, GitHub Releases и другие HTTPS-источники.
+
+```powershell
+.\homeproxy-verify-release.exe -manifest release.json -signature release.sig -public-key release-public.pem -package candidate.exe -component server -channel stable -current 0.1.0 -out staged.exe
+```
+
+Манифест формата 1 содержит массив artifacts. Запись включает component, channel, version, platform, arch, url, size, sha256, apiMin, apiMax, dbSchema и notes. Подпись release.sig представляет собой base64 от Ed25519-подписи исходных байтов release.json. Публичный ключ передаётся в PEM PKIX.
+
+## Служба HomeProxyServer
+
+Из административного PowerShell запустите обновление. Служба должна работать с сервером версии 0.1.1 или новее и с абсолютным путём к конфигурации. Установочный каталог и каталог .homeproxy-updates должны быть доступны для записи только администраторам.
+
+```powershell
+.\homeproxy-verify-release.exe -apply-service -manifest release.json -signature release.sig -public-key release-public.pem -package candidate.exe -channel stable
+```
+
+Утилита определяет версию, API и схему текущего сервера по локальному /healthz и сверяет PID со службой. Для проверки нужен числовой локальный адрес или адрес всех интерфейсов в listen. После проверки подписи и хеша утилита останавливает службу, сохраняет прежний EXE и копию SQLite в .homeproxy-updates, обновляет EXE и проверяет запуск. Если запуск или проверка не проходят, она автоматически возвращает прежний EXE и запускает службу. Рабочая база сохраняется. Поддерживаются выпуски с той же схемой SQLite.
+
+Версия 0.1.2 обновляет SQLite со схемы 1 до 2 при первом запуске. Для этого перехода предусмотрена ручная замена EXE при остановленной службе с предварительным сохранением EXE и копии базы. При возврате к 0.1.1 используйте копию базы, сделанную до миграции.
+
+После прерывания процесса обновления команда ниже завершает восстановление. Другие попытки установки блокируются, пока есть ожидающая транзакция.
+
+```powershell
+.\homeproxy-verify-release.exe -recover-service
+```
+
+Переход со сборки сервера 0.1.0 выполняется вручную с резервной копией. `Update-ServerFromGitHub.ps1` проверяет стабильный выпуск и запускает транзакционную замену EXE. Скрипт можно запускать автоматически планировщиком Windows из административного каталога установки. Обновление службы поддерживает выпуски с той же схемой SQLite.
+
+## Windows Agent
+
+Build.ps1 с Installer, WindowsUpdateEndpoint и WindowsUpdatePublicKey создаёт NSIS и подпись Tauri. Передайте путь к приватному ключу через TAURI_SIGNING_PRIVATE_KEY. HTTPS URL может включать {channel} для dev, beta и stable. Манифест Tauri должен также содержать apiMin и apiMax. Текущий API равен 1.
+
+При старте сборка с настроенным источником проверяет канал stable и загружает подписанный установщик. Для установки требуется действие пользователя во вкладке «Обновления». Установщик содержит UI, контроллер и sing-box. Перед запуском установщика интерфейс останавливает контроллер через локальный авторизованный API. После запуска обновлённого приложения контроллер автоматически восстанавливается, если работал до установки. При активном TUN сначала требуется завершить системный режим. Сценарий проверен в интерактивном сеансе Windows VM при обновлении 0.1.2 до тестовой 0.1.3. [Tauri Updater](https://v2.tauri.app/plugin/updater/)
+
+## Android
+
+GitHub Releases содержит подписанные APK для ARM64 и x86_64. Локальная сборка с `SigningKeystore` использует постоянный ключ выпуска и собирает релизный APK.
+
+Для источника обновлений передайте Build-Android.ps1 параметры ReleasePublicKey, UpdateManifest и UpdateSignature. Нужен закреплённый открытый ключ Ed25519 в формате PKIX PEM и два HTTPS URL. Сборки без этих параметров показывают статус источника во вкладке «Обновления».
+
+В общем манифесте для APK укажите component agent, platform android, arch x86_64 или aarch64 и versionCode из AndroidManifest. HomeProxy проверяет подпись манифеста, совместимость API, версию, размер и SHA-256 APK, имя пакета и сертификат установленного приложения. Пользователь разрешает установки для HomeProxy и даёт согласие в системном PackageInstaller. Версии APK должны быть подписаны одним совместимым ключом. [Android PackageInstaller](https://developer.android.com/reference/android/content/pm/PackageInstaller.Session)
+
+## Расширение браузера
+
+GitHub Releases публикует ZIP, подписанный CRX и `browser-update.xml`. Браузер, который поддерживает самостоятельное размещение расширений, использует этот XML для обновления CRX с тем же идентификатором. Для обычного Chrome под Windows и macOS автоматическая установка требует публикации в Chrome Web Store. Для распакованного расширения обновление загружается из GitHub и применяется через менеджер расширений. [Ограничения Chrome](https://developer.chrome.com/docs/extensions/how-to/distribute/install-extensions)
+
+Транспорт использует [sing-box 1.14.4](https://github.com/SagerNet/sing-box/tree/v1.14.4). Исходный код модификации для Android находится в `native/android/libbox-private-config.patch`, команды сборки находятся в `scripts/Build-Android.ps1`.

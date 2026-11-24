@@ -1,0 +1,9 @@
+{
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "externalBin": ["binaries/homeproxy-agent", "binaries/sing-box"],
+    "resources": ["binaries/sing-box-license.txt"],
+    "windows": { "allowDowngrades": false }
+  }
+}

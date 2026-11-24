@@ -1,0 +1,20 @@
+{
+  "listen": "127.0.0.1:8443",
+  "publicUrl": "https://proxy.example.com:8443",
+  "database": "data/homeproxy.sqlite",
+  "keyFile": "data/vault.key",
+  "realityKeyFile": "data/reality.key",
+  "certFile": "tls/cert.pem",
+  "tlsKeyFile": "tls/key.pem",
+  "adminTokenFile": "keys/admin-token.txt",
+  "adminDir": "admin",
+  "singBox": "sing-box.exe",
+  "tunnelListen": "127.0.0.1:8444",
+  "tunnelHost": "proxy.example.com",
+  "tunnelPort": 8444,
+  "serverName": "handshake.example.com",
+  "handshakeHost": "handshake.example.com",
+  "handshakePort": 443,
+  "probeUrl": "https://health.example.com/ready",
+  "loopbackDev": false
+}

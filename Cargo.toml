@@ -1,0 +1,8 @@
+[workspace]
+members = ["apps/client/controller", "apps/client/src-tauri"]
+default-members = ["apps/client/controller"]
+resolver = "2"
+
+[profile.release]
+strip = true
+lto = "thin"

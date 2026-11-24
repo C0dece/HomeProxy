@@ -204,7 +204,8 @@ internal object MobileRuntime {
         val remote = current.optJSONObject("remote")
         val tag = current.optString("etag").takeIf { it.isNotEmpty() }
         try {
-            val (code, body, nextTag) = request(current, "/config?platform=android", "GET", etag = tag)
+            val (code, body, nextTag) = request(current, "/config?platform=android", "GET", etag = tag,
+                version = AndroidUpdates.installedVersion(context))
             online = true
             if (code == 401) {
                 dropConnection(context)
@@ -240,10 +241,11 @@ internal object MobileRuntime {
     }
 
     private fun request(account: JSONObject, path: String, method: String, body: JSONObject? = null,
-                        etag: String? = null): Reply {
+                        etag: String? = null, version: String? = null): Reply {
         val builder = Request.Builder().url(account.getString("origin") + "/api/v1" + path)
         if (path != "/connect") builder.header("Authorization", "Bearer " + account.getString("key"))
         if (etag != null) builder.header("If-None-Match", etag)
+        if (!version.isNullOrEmpty()) builder.header("X-HomeProxy-Version", version)
         builder.method(method, body?.toString()?.toRequestBody(jsonType))
         http.newCall(builder.build()).execute().use { response ->
             val output = ByteArrayOutputStream()

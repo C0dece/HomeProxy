@@ -44,16 +44,18 @@ internal object AndroidUpdates {
     } catch (_: FileNotFoundException) { null }
 
     @Suppress("DEPRECATION")
-    private fun installed(context: Context) = context.packageManager.getPackageInfo(
-        context.packageName, PackageManager.GET_SIGNING_CERTIFICATES
+    private fun installed(context: Context, flags: Int = PackageManager.GET_SIGNING_CERTIFICATES) = context.packageManager.getPackageInfo(
+        context.packageName, flags
     )
+
+    fun installedVersion(context: Context): String = installed(context, 0).versionName.orEmpty()
 
     private fun sessions(context: Context) = context.packageManager.packageInstaller.mySessions
         .filter { it.appPackageName == context.packageName }
 
     fun status(context: Context): JSONObject = JSONObject()
         .put("configured", source(context) != null)
-        .put("installed", installed(context).versionName ?: "")
+        .put("installed", installedVersion(context))
         .put("allowed", context.packageManager.canRequestPackageInstalls())
         .put("active", sessions(context).isNotEmpty())
         .put("confirm", confirmation != null)

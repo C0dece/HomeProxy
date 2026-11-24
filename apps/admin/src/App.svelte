@@ -21,6 +21,7 @@
     'rule.saved': 'Сохранено правило', 'rule.deleted': 'Удалено правило', 'routes.saved': 'Назначены прокси'
   }
   const deviceStates: Record<string, string> = { connected: 'Подключено', invited: 'Ожидает', revoked: 'Отозвано' }
+  const releasePlatforms = { windows: 'Windows', android: 'Android', browser: 'Расширение' }
   const updateOutcomes: Record<UpdateEntry['outcome'], string> = {
     installed: 'Установлено', 'no-update': 'Нет совместимого обновления', completed: 'Проверка завершена', failed: 'Ошибка', paused: 'Пропущено по политике'
   }
@@ -325,6 +326,26 @@
                 </div>
               {/if}
             {/await}
+          </section>
+          <section class="card stack">
+            <h2>Версии клиентских устройств</h2>
+            {#if !data.devices.length}
+              <p class="empty">Устройств пока нет.</p>
+            {:else}
+              <div class="table-scroll"><table>
+                <thead><tr><th>Устройство</th><th>Платформа</th><th>Установленная версия</th><th>Получен отчёт</th></tr></thead>
+                <tbody>
+                  {#each data.devices as device (device.id)}
+                    <tr>
+                      <td data-label="Устройство">{device.label}{#if device.status === 'revoked'} <span class="badge bad">Отозвано</span>{/if}</td>
+                      <td data-label="Платформа">{device.platform ? releasePlatforms[device.platform] : 'Нет данных'}</td>
+                      <td data-label="Установленная версия">{device.installedVersion || 'Нет данных'}</td>
+                      <td data-label="Получен отчёт">{stamp(device.reportedAt ?? 0)}</td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table></div>
+            {/if}
           </section>
           <section class="card stack">
             <h2>История обновлений сервера</h2>

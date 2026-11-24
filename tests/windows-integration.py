@@ -410,6 +410,16 @@ def test(args, root):
                                                 "transport": "agent"}, expected=201)
         assert request(api, "GET", "/api/v1/config", token=other_key)[0]["proxies"] == []
         request(api, "GET", "/api/v1/admin/state", token=other_key, expected=401)
+        def reported(label):
+            return next(row for row in change("GET", "state")["devices"] if row["label"] == label)
+
+        assert reported("Other agent")["installedVersion"] == ""
+        _, android_tag = request(api, "GET", "/api/v1/config?platform=android", token=other_key,
+                                 headers={"X-HomeProxy-Version": "1.2.3"})
+        request(api, "GET", "/api/v1/config?platform=android", token=other_key, expected=304,
+                headers={"If-None-Match": android_tag, "X-HomeProxy-Version": "1.2.4"})
+        eventual(lambda: reported("Other agent")["installedVersion"] == "1.2.4", "Android version report on 304")
+        assert reported("Other agent")["platform"] == "android"
         browser_link = change("POST", "invites", {"userId": user, "label": "Browser QA", "transport": "browser"}, 201)
         browser_key = secrets.token_urlsafe(32)
         pair = {"token": browser_link["link"].split("#")[1], "deviceKey": browser_key, "transport": "browser"}
@@ -427,6 +437,8 @@ def test(args, root):
         assert status["linked"] and status["revision"], status
         eventual(lambda: ctl("status")["route"]["selected"] == "home", "REALITY primary")
         assert proxied(local, origin.server_port)
+        eventual(lambda: reported("Agent QA")["installedVersion"], "Windows installed version report")
+        assert reported("Agent QA")["platform"] == "windows"
         print("PASS registration, scoped configuration, REALITY and authenticated CONNECT", flush=True)
         if named_host:
             status = ctl("sync")

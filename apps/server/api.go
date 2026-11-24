@@ -464,8 +464,15 @@ func (s *server) config(w http.ResponseWriter, r *http.Request) {
 	if report(w, err) {
 		return
 	}
-	defer tx.Rollback()
-	d, err := identity(tx, r)
+	var d device
+	var android, delivered bool
+	defer func() {
+		tx.Rollback()
+		if delivered {
+			s.recordDeviceRelease(r, d, android)
+		}
+	}()
+	d, err = identity(tx, r)
 	if report(w, err) {
 		return
 	}
@@ -473,13 +480,14 @@ func (s *server) config(w http.ResponseWriter, r *http.Request) {
 	if report(w, err) {
 		return
 	}
-	android := d.transport == "agent" && r.URL.Query().Get("platform") == "android"
+	android = d.transport == "agent" && r.URL.Query().Get("platform") == "android"
 	tag := fmt.Sprintf("\"%s-%d\"", d.id, rev)
 	if android {
 		tag = fmt.Sprintf("\"%s-%d-android\"", d.id, rev)
 	}
 	w.Header().Set("ETag", tag)
 	if r.Header.Get("If-None-Match") == tag {
+		delivered = true
 		w.WriteHeader(304)
 		return
 	}
@@ -501,6 +509,7 @@ func (s *server) config(w http.ResponseWriter, r *http.Request) {
 		result["home"] = endpoint{s.cfg.TunnelHost, s.cfg.TunnelPort, d.primary, d.direct, s.cfg.ServerName,
 			base64.RawURLEncoding.EncodeToString(s.key.PublicKey().Bytes()), s.shortID}
 	}
+	delivered = true
 	send(w, 200, result)
 }
 
@@ -567,8 +576,10 @@ func (s *server) state(w http.ResponseWriter, r *http.Request) {
 		"users":   "SELECT id,name FROM users ORDER BY name",
 		"proxies": "SELECT id,name,host,port,tls FROM proxies ORDER BY name",
 		"routes":  "SELECT user_id AS userId,proxy_id AS proxyId,priority FROM routes ORDER BY user_id,priority",
-		"devices": `SELECT id,user_id AS userId,label,transport,ack_revision AS ackRevision,seen,expires,
-			CASE WHEN revoked=1 THEN 'revoked' WHEN token_hash IS NOT NULL THEN 'connected' ELSE 'invited' END AS status FROM devices ORDER BY seen DESC,label`,
+		"devices": `SELECT d.id,d.user_id AS userId,d.label,d.transport,d.ack_revision AS ackRevision,d.seen,d.expires,
+			COALESCE(r.platform,'') AS platform,COALESCE(r.version,'') AS installedVersion,COALESCE(r.reported_at,0) AS reportedAt,
+			CASE WHEN d.revoked=1 THEN 'revoked' WHEN d.token_hash IS NOT NULL THEN 'connected' ELSE 'invited' END AS status
+			FROM devices d LEFT JOIN device_reports r ON r.device_id=d.id ORDER BY d.seen DESC,d.label`,
 		"audit": "SELECT revision,event,time FROM audit ORDER BY revision DESC LIMIT 100",
 	}
 	for k, q := range queries {

@@ -337,6 +337,12 @@ def test(args, root):
 
         loopback.eventual(lambda: ctl("status")["route"]["selected"] == "home", "Android VLESS route", 35)
         loopback.eventual(proxied, "Android HTTP through VLESS")
+        apk_version = re.search(rb"versionName=([^\s]+)", adb("shell", "dumpsys", "package", APP)).group(1).decode()
+        def reported_version():
+            return next((row for row in change("GET", "state", None)["devices"]
+                         if row["label"] == "Android emulator" and row["platform"] == "android"
+                         and row["installedVersion"] == apk_version), None)
+        loopback.eventual(reported_version, "Android installed version report")
         print("PASS Android link, permission, TUN and real VLESS + REALITY traffic", flush=True)
         if args.network_vpn:
             loopback.eventual(lambda: proxied(PROBE_APP, DNS_TARGET), "Android DNS through VPN", 22)

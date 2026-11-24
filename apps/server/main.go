@@ -221,6 +221,9 @@ func migrate(db *sql.DB) error {
 			return err
 		}
 	}
+	if _, err = tx.Exec(createDeviceReports); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 

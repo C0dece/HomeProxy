@@ -45,6 +45,9 @@ try {
   await admin.getByText('Восстановление, код 7', { exact: true }).waitFor()
   await admin.getByText('Нет совместимого обновления', { exact: true }).waitFor()
   await admin.getByText('Пропущено по политике', { exact: true }).waitFor()
+  const windowsDevice = admin.getByRole('row').filter({ hasText: 'Agent QA' })
+  await windowsDevice.getByText('Windows', { exact: true }).waitFor()
+  await windowsDevice.getByText(/^\d+\.\d+\.\d+$/).waitFor()
   await admin.getByRole('button', { name: 'Приостановить', exact: true }).click()
   await admin.getByText('На паузе', { exact: true }).waitFor()
   const [policyAfterRefresh] = await Promise.all([
@@ -138,6 +141,12 @@ try {
   await popup.getByRole('button', { name: 'Включить маршрутизацию' }).waitFor()
   await popup.close()
   console.log('PASS Chromium extension enrollment, live PAC proxy, resource discovery and BLOCK')
+
+  await admin.getByRole('button', { name: 'Обновления', exact: true }).click()
+  await admin.getByRole('button', { name: 'Обновить данные' }).click()
+  const browserDevice = admin.getByRole('row').filter({ hasText: 'Chromium QA' })
+  await browserDevice.getByText('Расширение', { exact: true }).waitFor()
+  await browserDevice.getByText(/^\d+\.\d+\.\d+$/).waitFor()
 
   web = createServer(async (req, res) => {
     const path = req.url === '/' ? 'index.html' : req.url?.slice(1)

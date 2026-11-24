@@ -408,7 +408,11 @@ impl Controller {
         let mut request = self
             .http
             .get(Self::endpoint(&e, "config")?)
-            .bearer_auth(&e.key);
+            .bearer_auth(&e.key)
+            .header(
+                "X-HomeProxy-Version",
+                option_env!("HOMEPROXY_RELEASE_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")),
+            );
         if let Some(current) = &self.state.remote {
             request = request.header(
                 IF_NONE_MATCH,

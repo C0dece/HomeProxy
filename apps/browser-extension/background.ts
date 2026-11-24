@@ -102,7 +102,8 @@ async function sync(state: BrowserState) {
   // Deep copy because queued edits and refreshed policies are mutated in place.
   const before = structuredClone(state)
   try {
-    const headers = state.revision ? { 'If-None-Match': `"${state.deviceId}-${state.revision}"` } : undefined
+    const headers: Record<string, string> = { 'X-HomeProxy-Version': chrome.runtime.getManifest().version }
+    if (state.revision) headers['If-None-Match'] = `"${state.deviceId}-${state.revision}"`
     const response = await api(state, 'config', { headers })
     if (response.status === 401) {
       // Keep the mandatory proxy fail-closed until the user turns it off.

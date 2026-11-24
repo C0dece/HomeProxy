@@ -284,6 +284,7 @@ func (s *server) handler() http.Handler {
 		fmt.Fprintln(w, "Скопируйте ссылку целиком и вставьте в HomeProxy.")
 	})
 	r.HandleFunc("GET /api/v1/admin/state", s.admin(s.state))
+	r.HandleFunc("GET /api/v1/admin/update-history", s.admin(s.updateHistory))
 	r.HandleFunc("POST /api/v1/admin/users", s.admin(s.user))
 	r.HandleFunc("PUT /api/v1/admin/proxies", s.admin(s.proxy))
 	r.HandleFunc("DELETE /api/v1/admin/proxies/{id}", s.admin(s.deleteProxy))

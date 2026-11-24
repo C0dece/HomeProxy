@@ -480,6 +480,21 @@ def test(args, root):
         ctl("sync")
         print("PASS Windows process enumeration and EXE routing across LOCAL/PERSONAL/GLOBAL", flush=True)
         if args.browser_qa:
+            history = root / ".homeproxy-update-history"
+            history.mkdir()
+            records = (
+                {"outcome": "installed", "phase": "apply", "version": "1.2.3"},
+                {"outcome": "failed", "phase": "recovery", "exitCode": 7},
+                {"outcome": "no-update", "phase": "apply"},
+            )
+            for index, record in enumerate(records, 1):
+                (history / f"{index:021d}-{index:032x}.json").write_text(
+                    json.dumps({"startedAt": 1720000000, "finishedAt": 1720000010, **record}), encoding="utf-8"
+                )
+            (history / f"{4:021d}-{4:032x}.json").write_text('{"outcome":"unknown"}', encoding="utf-8")
+            request(api, "GET", "/api/v1/admin/update-history", expected=401)
+            entries, _ = request(api, "GET", "/api/v1/admin/update-history", token=admin)
+            assert [entry["outcome"] for entry in entries] == ["no-update", "failed", "installed"], entries
             link = change("POST", "invites", {"userId": user, "label": "Chromium QA", "transport": "browser"}, 201)["link"]
             browser_env = {
                 **env, "HOMEPROXY_QA_API": f"http://{address(api)}", "HOMEPROXY_QA_INVITE": link,

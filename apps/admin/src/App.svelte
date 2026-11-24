@@ -4,7 +4,7 @@
   import { actionNames, scopeOf } from '../../../packages/shared/models'
   import type { Action, Rule } from '../../../packages/shared/models'
   import { admin } from './api'
-  import type { Proxy, State } from './api'
+  import type { Proxy, State, UpdateEntry } from './api'
 
   const views = [
     { id: 'overview', label: 'Обзор', icon: LayoutDashboard },
@@ -21,6 +21,12 @@
     'rule.saved': 'Сохранено правило', 'rule.deleted': 'Удалено правило', 'routes.saved': 'Назначены прокси'
   }
   const deviceStates: Record<string, string> = { connected: 'Подключено', invited: 'Ожидает', revoked: 'Отозвано' }
+  const updateOutcomes: Record<UpdateEntry['outcome'], string> = {
+    installed: 'Установлено', 'no-update': 'Нет совместимого обновления', completed: 'Проверка завершена', failed: 'Ошибка'
+  }
+  const updatePhases: Record<UpdateEntry['phase'], string> = {
+    prerequisites: 'Подготовка', recovery: 'Восстановление', apply: 'Проверка и установка'
+  }
   type Dialog = 'invite' | 'proxy' | 'user' | 'routes' | 'rule'
   const dialogNames: Record<Dialog, string> = { invite: 'Ссылка подключения', proxy: 'Прокси', user: 'Пользователь', routes: 'Очередь прокси', rule: 'Правило' }
 
@@ -46,6 +52,7 @@
   let candidate = $state('')
   let systemHealth = $state<boolean | null>(null)
   let serverRelease = $state<{ version: string; api: number; dbSchema: number } | null>(null)
+  let updateHistory = $state<Promise<UpdateEntry[] | null>>()
   let title = $derived(views.find(item => item.id === view)?.label)
   let active = $derived(data?.devices.filter(d => d.status === 'connected').length ?? 0)
 
@@ -66,6 +73,10 @@
       serverRelease = null
       systemHealth = false
     }
+    if (view === 'updates') loadUpdateHistory()
+  }
+  function loadUpdateHistory() {
+    updateHistory = admin<UpdateEntry[]>(token, 'update-history').catch(() => null)
   }
   async function task(work: () => Promise<void>) {
     busy = true; error = ''; message = ''
@@ -78,7 +89,11 @@
     token = keyInput.trim()
     void task(async () => { await load(); keyInput = '' })
   }
-  function navigate(next: typeof view) { view = next; search = ''; error = ''; message = '' }
+  function navigate(next: typeof view) {
+    view = next; search = ''; error = ''; message = ''
+    if (next === 'updates') loadUpdateHistory()
+    else updateHistory = undefined
+  }
   function open(type: Dialog, item?: Proxy | Rule) {
     error = ''; message = ''; dialog = type; link = ''; label = ''; transport = 'agent'; candidate = ''
     editingProxy = type === 'proxy' ? item as Proxy | undefined : undefined
@@ -285,6 +300,37 @@
             {/if}
             <p><a href="https://github.com/C0dece/HomeProxy/releases/latest" target="_blank" rel="noopener noreferrer">Стабильный выпуск на GitHub</a></p>
           </section>
+          <section class="card stack">
+            <h2>История обновлений сервера</h2>
+            {#await updateHistory}
+              <p class="muted" role="status">Загрузка истории…</p>
+            {:then entries}
+              {#if !entries}
+                <p class="notice error" role="alert">История обновлений недоступна.</p>
+              {:else if !entries.length}
+                <p class="empty">Пока нет записей об обновлениях.</p>
+              {:else}
+                <div class="table-scroll"><table>
+                  <thead><tr><th>Время завершения</th><th>Результат</th><th>Подробности</th></tr></thead>
+                  <tbody>
+                    {#each entries as entry}
+                      <tr>
+                        <td data-label="Время завершения">{stamp(entry.finishedAt)}</td>
+                        <td data-label="Результат">
+                          <span class="badge update-outcome" class:ok={entry.outcome === 'installed'} class:bad={entry.outcome === 'failed'}>{updateOutcomes[entry.outcome]}</span>
+                        </td>
+                        <td data-label="Подробности">
+                          {#if entry.version}Версия {entry.version}
+                          {:else if entry.outcome === 'failed'}{updatePhases[entry.phase]}{#if entry.exitCode !== undefined}, код {entry.exitCode}{/if}
+                          {:else}Стабильный канал{/if}
+                        </td>
+                      </tr>
+                    {/each}
+                  </tbody>
+                </table></div>
+              {/if}
+            {/await}
+          </section>
         {:else if view === 'audit'}
           <section class="card stack">
             <h2>Последние изменения</h2>
@@ -360,6 +406,7 @@
 {/if}
 
 <style>
+  .update-outcome { white-space: normal; }
   .login { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
   .login form { width: min(100%, 430px); gap: 24px; }
   .shell { min-height: 100vh; display: grid; grid-template-columns: 224px minmax(0, 1fr); }

@@ -1,5 +1,6 @@
 .homeproxy/
 .homeproxy-updates/
+.homeproxy-update-history/
 .tools/
 /server.json
 /keys/

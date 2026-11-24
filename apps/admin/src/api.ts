@@ -4,6 +4,14 @@ export type User = { id: string; name: string }
 export type Proxy = User & { host: string; port: number; tls: number }
 export type Device = { id: string; userId: string; label: string; transport: string; ackRevision: number; status: string; seen: number; expires: number }
 export type Event = { revision: number; event: string; time: number }
+export type UpdateEntry = {
+  startedAt: number
+  finishedAt: number
+  outcome: 'installed' | 'no-update' | 'completed' | 'failed'
+  phase: 'prerequisites' | 'recovery' | 'apply'
+  version?: string
+  exitCode?: number
+}
 export type State = {
   revision: number
   users: User[]

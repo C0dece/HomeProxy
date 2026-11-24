@@ -621,7 +621,10 @@ if __name__ == "__main__":
             test(args, root)
         except Exception as error:
             if isinstance(error, subprocess.CalledProcessError) and error.stderr:
-                print(f"Command error: {error.stderr.decode('utf-8', errors='replace').strip()[-1200:]}", flush=True)
+                stderr = error.stderr
+                if isinstance(stderr, bytes):
+                    stderr = stderr.decode("utf-8", errors="replace")
+                print(f"Command error: {stderr.strip()[-1200:]}", flush=True)
             agent_log = root / "agent.log"
             if args.tun_vm and agent_log.is_file():
                 details = agent_log.read_text(encoding="utf-8", errors="replace").strip()

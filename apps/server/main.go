@@ -17,6 +17,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -36,6 +37,7 @@ import (
 
 //go:embed migrations/*.sql
 var migrations embed.FS
+var bundledAdmin fs.FS
 
 const apiVersion = 1
 const schemaVersion = 2
@@ -43,24 +45,24 @@ const schemaVersion = 2
 var releaseVersion = "0.1.2"
 
 type settings struct {
-	Listen         string `json:"listen"`
-	PublicURL      string `json:"publicUrl"`
-	Database       string `json:"database"`
-	KeyFile        string `json:"keyFile"`
-	CertFile       string `json:"certFile"`
-	TLSKeyFile     string `json:"tlsKeyFile"`
-	AdminDir       string `json:"adminDir"`
-	AdminTokenFile string `json:"adminTokenFile"`
-	SingBox        string `json:"singBox"`
-	TunnelListen   string `json:"tunnelListen"`
-	TunnelHost     string `json:"tunnelHost"`
-	TunnelPort     int    `json:"tunnelPort"`
-	RealityKeyFile string `json:"realityKeyFile"`
-	HandshakeHost  string `json:"handshakeHost"`
-	HandshakePort  int    `json:"handshakePort"`
-	ServerName     string `json:"serverName"`
-	ProbeURL       string `json:"probeUrl"`
-	LoopbackDev    bool   `json:"loopbackDev"`
+	Listen         string  `json:"listen"`
+	PublicURL      string  `json:"publicUrl"`
+	Database       string  `json:"database"`
+	KeyFile        string  `json:"keyFile"`
+	CertFile       string  `json:"certFile"`
+	TLSKeyFile     string  `json:"tlsKeyFile"`
+	AdminDir       *string `json:"adminDir"`
+	AdminTokenFile string  `json:"adminTokenFile"`
+	SingBox        string  `json:"singBox"`
+	TunnelListen   string  `json:"tunnelListen"`
+	TunnelHost     string  `json:"tunnelHost"`
+	TunnelPort     int     `json:"tunnelPort"`
+	RealityKeyFile string  `json:"realityKeyFile"`
+	HandshakeHost  string  `json:"handshakeHost"`
+	HandshakePort  int     `json:"handshakePort"`
+	ServerName     string  `json:"serverName"`
+	ProbeURL       string  `json:"probeUrl"`
+	LoopbackDev    bool    `json:"loopbackDev"`
 }
 
 type server struct {
@@ -141,8 +143,8 @@ func (c settings) validate() error {
 }
 
 func (c *settings) resolvePaths(root string) {
-	for _, p := range []*string{&c.Database, &c.KeyFile, &c.CertFile, &c.TLSKeyFile, &c.AdminDir, &c.AdminTokenFile, &c.SingBox, &c.RealityKeyFile} {
-		if *p != "" && !filepath.IsAbs(*p) {
+	for _, p := range []*string{&c.Database, &c.KeyFile, &c.CertFile, &c.TLSKeyFile, c.AdminDir, &c.AdminTokenFile, &c.SingBox, &c.RealityKeyFile} {
+		if p != nil && *p != "" && !filepath.IsAbs(*p) {
 			*p = filepath.Join(root, *p)
 		}
 	}
@@ -292,8 +294,12 @@ func (s *server) handler() http.Handler {
 	r.HandleFunc("DELETE /api/v1/admin/rules/{id}", s.admin(s.deleteRule))
 	r.HandleFunc("POST /api/v1/admin/probes/{id}", s.admin(s.probe))
 	r.HandleFunc("POST /api/v1/admin/backups", s.admin(s.backup))
-	if s.cfg.AdminDir != "" {
-		r.Handle("GET /", http.FileServer(http.Dir(s.cfg.AdminDir)))
+	if s.cfg.AdminDir == nil {
+		if bundledAdmin != nil {
+			r.Handle("GET /", http.FileServerFS(bundledAdmin))
+		}
+	} else if *s.cfg.AdminDir != "" {
+		r.Handle("GET /", http.FileServer(http.Dir(*s.cfg.AdminDir)))
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")

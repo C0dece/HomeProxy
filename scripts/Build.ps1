@@ -41,9 +41,22 @@ try {
     }
     Invoke-BuildStep { npm.cmd ci --no-audit --no-fund }
     Invoke-BuildStep { npm.cmd run build }
-    $serverArgs = @('build', '-mod=readonly', '-trimpath', '-o', 'dist/homeproxy-server.exe')
+    $adminAssets = (Resolve-Path -LiteralPath 'dist/admin').Path
+    $embedRoot = Join-Path $PWD 'apps/server/admin-panel'
+    $replace = @{}
+    foreach ($asset in Get-ChildItem -LiteralPath $adminAssets -File -Recurse) {
+        $relative = [IO.Path]::GetRelativePath($adminAssets, $asset.FullName)
+        $replace[(Join-Path $embedRoot $relative)] = $asset.FullName
+    }
+    $overlay = Join-Path ([IO.Path]::GetTempPath()) ("homeproxy-admin-" + [guid]::NewGuid() + ".json")
+    $serverArgs = @('build', '-mod=readonly', '-trimpath', '-tags=admin_bundle', "-overlay=$overlay", '-o', 'dist/homeproxy-server.exe')
     if ($Version) { $serverArgs += "-ldflags=-X main.releaseVersion=$Version" }
-    Invoke-BuildStep { & $Go @serverArgs ./apps/server }
+    try {
+        @{ Replace = $replace } | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $overlay -Encoding utf8NoBOM
+        Invoke-BuildStep { & $Go @serverArgs ./apps/server }
+    } finally {
+        Remove-Item -LiteralPath $overlay -ErrorAction SilentlyContinue
+    }
     Invoke-BuildStep { & $Go build -mod=readonly -trimpath -o dist/homeproxy-verify-release.exe ./updater/server }
     Invoke-BuildStep { cargo build --release --locked -p homeproxy-agent -p homeproxy-desktop }
     New-Item -ItemType Directory -Path $WindowsDirectory -Force | Out-Null

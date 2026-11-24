@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Activity, ArrowRight, Cable, DatabaseBackup, Globe2, LayoutDashboard, Link2, ListFilter, LogOut, Monitor, Plus, RefreshCw, Router, Shield, Users, X } from 'lucide-svelte'
+  import { Activity, ArrowRight, Cable, DatabaseBackup, Globe2, LayoutDashboard, Link2, ListFilter, LogOut, Monitor, PackageCheck, Plus, RefreshCw, Router, Shield, Users, X } from 'lucide-svelte'
   import Brand from '../../../packages/ui/Brand.svelte'
   import { actionNames, scopeOf } from '../../../packages/shared/models'
   import type { Action, Rule } from '../../../packages/shared/models'
@@ -12,6 +12,7 @@
     { id: 'users', label: 'Пользователи', icon: Users },
     { id: 'devices', label: 'Устройства', icon: Monitor },
     { id: 'rules', label: 'Правила', icon: ListFilter },
+    { id: 'updates', label: 'Обновления', icon: PackageCheck },
     { id: 'audit', label: 'Журнал и копии', icon: DatabaseBackup }
   ] as const
   const eventNames: Record<string, string> = {
@@ -44,6 +45,7 @@
   let selected = $state<string[]>([])
   let candidate = $state('')
   let systemHealth = $state<boolean | null>(null)
+  let serverRelease = $state<{ version: string; api: number; dbSchema: number } | null>(null)
   let title = $derived(views.find(item => item.id === view)?.label)
   let active = $derived(data?.devices.filter(d => d.status === 'connected').length ?? 0)
 
@@ -56,7 +58,14 @@
   async function load() {
     data = await admin<State>(token, 'state')
     connected = true
-    systemHealth = await fetch('/healthz', { signal: AbortSignal.timeout(2000) }).then(r => r.ok).catch(() => false)
+    try {
+      const health = await fetch('/healthz', { signal: AbortSignal.timeout(2000) })
+      serverRelease = health.ok || health.status === 503 ? await health.json() : null
+      systemHealth = health.ok
+    } catch {
+      serverRelease = null
+      systemHealth = false
+    }
   }
   async function task(work: () => Promise<void>) {
     busy = true; error = ''; message = ''
@@ -182,7 +191,7 @@
             <button class="primary" onclick={() => open('user')}><Plus size={17} /> Добавить пользователя</button>
           {:else if view === 'rules'}
             <button class="primary" onclick={() => open('rule')}><Plus size={17} /> Добавить правило</button>
-          {:else}
+          {:else if view === 'audit'}
             <button class="primary" disabled={busy} onclick={backup}><DatabaseBackup size={17} /> Создать копию SQLite</button>
           {/if}
         </div>
@@ -265,7 +274,18 @@
               {/each}</tbody>
             </table></div>{/if}
           </section>
-        {:else}
+        {:else if view === 'updates'}
+          <section class="card stack">
+            <h2>HomeProxy Server</h2>
+            {#if serverRelease?.version}
+              <p>Установленная версия <strong>{serverRelease.version}</strong></p>
+              <p class="muted">API {serverRelease.api}, схема SQLite {serverRelease.dbSchema}</p>
+            {:else}
+              <p class="muted">Версия сервера недоступна.</p>
+            {/if}
+            <p><a href="https://github.com/C0dece/HomeProxy/releases/latest" target="_blank" rel="noopener noreferrer">Стабильный выпуск на GitHub</a></p>
+          </section>
+        {:else if view === 'audit'}
           <section class="card stack">
             <h2>Последние изменения</h2>
             {#if !data.audit.length}<p class="empty">В журнале пока нет событий.</p>

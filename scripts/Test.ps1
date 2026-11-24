@@ -29,9 +29,9 @@ try {
     Invoke-TestStep { cargo fmt --all -- --check }
     Invoke-TestStep { cargo clippy --release --locked -p homeproxy-agent -p homeproxy-desktop --all-targets -- -D warnings }
     $arguments = @('tests/windows-integration.py', '--server', 'dist/homeproxy-server.exe', '--agent', (Join-Path $WindowsDirectory 'homeproxy-agent.exe'),
-        '--sing-box', $SingBox, '--openssl', $OpenSsl, '--admin-dir', 'dist/admin')
+        '--sing-box', $SingBox, '--openssl', $OpenSsl)
     if ($Browser) { $arguments += @('--browser-qa', 'tests/browser-qa.mjs') }
-    Invoke-TestStep { & $Python @arguments }
+    Invoke-TestStep { & $Python -X utf8 @arguments }
 } finally {
     [Environment]::SetEnvironmentVariable('HOMEPROXY_TEST_SINGBOX', $previousTestSingBox)
     Pop-Location

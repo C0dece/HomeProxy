@@ -45,6 +45,8 @@ const schemaVersion = 2
 var releaseVersion = "0.1.2"
 
 type settings struct {
+	ManageAutomaticUpdates bool `json:"manageAutomaticUpdates"`
+
 	Listen         string  `json:"listen"`
 	PublicURL      string  `json:"publicUrl"`
 	Database       string  `json:"database"`
@@ -285,6 +287,8 @@ func (s *server) handler() http.Handler {
 	})
 	r.HandleFunc("GET /api/v1/admin/state", s.admin(s.state))
 	r.HandleFunc("GET /api/v1/admin/update-history", s.admin(s.updateHistory))
+	r.HandleFunc("GET /api/v1/admin/update-policy", s.admin(s.updatePolicy))
+	r.HandleFunc("PUT /api/v1/admin/update-policy", s.admin(s.updatePolicy))
 	r.HandleFunc("POST /api/v1/admin/users", s.admin(s.user))
 	r.HandleFunc("PUT /api/v1/admin/proxies", s.admin(s.proxy))
 	r.HandleFunc("DELETE /api/v1/admin/proxies/{id}", s.admin(s.deleteProxy))

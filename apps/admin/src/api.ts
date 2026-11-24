@@ -4,11 +4,12 @@ export type User = { id: string; name: string }
 export type Proxy = User & { host: string; port: number; tls: number }
 export type Device = { id: string; userId: string; label: string; transport: string; ackRevision: number; status: string; seen: number; expires: number }
 export type Event = { revision: number; event: string; time: number }
+export type UpdatePolicy = { managed: boolean; paused: boolean }
 export type UpdateEntry = {
   startedAt: number
   finishedAt: number
-  outcome: 'installed' | 'no-update' | 'completed' | 'failed'
-  phase: 'prerequisites' | 'recovery' | 'apply'
+  outcome: 'installed' | 'no-update' | 'completed' | 'failed' | 'paused'
+  phase: 'prerequisites' | 'recovery' | 'apply' | 'policy'
   version?: string
   exitCode?: number
 }
@@ -23,6 +24,8 @@ export type State = {
 }
 
 const errors: Record<string, string> = {
+  update_policy_disabled: 'Управление автообновлением на сервере отключено.',
+  update_policy_unavailable: 'Не удалось сохранить политику обновлений.',
   unauthorized: 'Проверьте ключ администратора.',
   name_taken: 'Это имя уже используется.',
   proxy_unreachable: 'Контрольный запрос через прокси не прошёл. Проверьте адрес и учётные данные.',

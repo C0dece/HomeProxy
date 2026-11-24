@@ -4,7 +4,7 @@
   import { actionNames, scopeOf } from '../../../packages/shared/models'
   import type { Action, Rule } from '../../../packages/shared/models'
   import { admin } from './api'
-  import type { Proxy, State, UpdateEntry } from './api'
+  import type { Proxy, State, UpdateEntry, UpdatePolicy } from './api'
 
   const views = [
     { id: 'overview', label: 'Обзор', icon: LayoutDashboard },
@@ -22,10 +22,10 @@
   }
   const deviceStates: Record<string, string> = { connected: 'Подключено', invited: 'Ожидает', revoked: 'Отозвано' }
   const updateOutcomes: Record<UpdateEntry['outcome'], string> = {
-    installed: 'Установлено', 'no-update': 'Нет совместимого обновления', completed: 'Проверка завершена', failed: 'Ошибка'
+    installed: 'Установлено', 'no-update': 'Нет совместимого обновления', completed: 'Проверка завершена', failed: 'Ошибка', paused: 'Пропущено по политике'
   }
   const updatePhases: Record<UpdateEntry['phase'], string> = {
-    prerequisites: 'Подготовка', recovery: 'Восстановление', apply: 'Проверка и установка'
+    prerequisites: 'Подготовка', recovery: 'Восстановление', apply: 'Проверка и установка', policy: 'Чтение политики'
   }
   type Dialog = 'invite' | 'proxy' | 'user' | 'routes' | 'rule'
   const dialogNames: Record<Dialog, string> = { invite: 'Ссылка подключения', proxy: 'Прокси', user: 'Пользователь', routes: 'Очередь прокси', rule: 'Правило' }
@@ -53,6 +53,7 @@
   let systemHealth = $state<boolean | null>(null)
   let serverRelease = $state<{ version: string; api: number; dbSchema: number } | null>(null)
   let updateHistory = $state<Promise<UpdateEntry[] | null>>()
+  let updatePolicy = $state<Promise<UpdatePolicy | null>>()
   let title = $derived(views.find(item => item.id === view)?.label)
   let active = $derived(data?.devices.filter(d => d.status === 'connected').length ?? 0)
 
@@ -73,10 +74,18 @@
       serverRelease = null
       systemHealth = false
     }
-    if (view === 'updates') loadUpdateHistory()
+    if (view === 'updates') loadUpdates()
   }
-  function loadUpdateHistory() {
+  function loadUpdates() {
     updateHistory = admin<UpdateEntry[]>(token, 'update-history').catch(() => null)
+    updatePolicy = admin<UpdatePolicy>(token, 'update-policy').catch(() => null)
+  }
+  function setUpdatesPaused(paused: boolean) {
+    void task(async () => {
+      const key = token
+      const policy = await admin<UpdatePolicy>(key, 'update-policy', 'PUT', { paused })
+      if (token === key && view === 'updates') updatePolicy = Promise.resolve(policy)
+    })
   }
   async function task(work: () => Promise<void>) {
     busy = true; error = ''; message = ''
@@ -91,8 +100,8 @@
   }
   function navigate(next: typeof view) {
     view = next; search = ''; error = ''; message = ''
-    if (next === 'updates') loadUpdateHistory()
-    else updateHistory = undefined
+    if (next === 'updates') loadUpdates()
+    else { updateHistory = undefined; updatePolicy = undefined }
   }
   function open(type: Dialog, item?: Proxy | Rule) {
     error = ''; message = ''; dialog = type; link = ''; label = ''; transport = 'agent'; candidate = ''
@@ -299,6 +308,23 @@
               <p class="muted">Версия сервера недоступна.</p>
             {/if}
             <p><a href="https://github.com/C0dece/HomeProxy/releases/latest" target="_blank" rel="noopener noreferrer">Стабильный выпуск на GitHub</a></p>
+          </section>
+          <section class="card stack">
+            <h2>Автоматические обновления сервера</h2>
+            {#await updatePolicy}
+              <p class="muted" role="status">Загрузка политики…</p>
+            {:then policy}
+              {#if !policy}
+                <p class="notice error" role="alert">Политика обновлений недоступна.</p>
+              {:else if !policy.managed}
+                <p class="muted">Управление из панели отключено в конфигурации сервера.</p>
+              {:else}
+                <div class="between">
+                  <span class="badge" class:wait={policy.paused} class:ok={!policy.paused}>{policy.paused ? 'На паузе' : 'Разрешены'}</span>
+                  <button disabled={busy} onclick={() => setUpdatesPaused(!policy.paused)}>{policy.paused ? 'Возобновить' : 'Приостановить'}</button>
+                </div>
+              {/if}
+            {/await}
           </section>
           <section class="card stack">
             <h2>История обновлений сервера</h2>

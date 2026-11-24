@@ -40,12 +40,14 @@ func readUpdateEntry(path string) (updateEntry, bool) {
 		return updateEntry{}, false
 	}
 	switch entry.Outcome {
+	case "paused":
+		return entry, entry.Phase == "policy" && entry.Version == "" && entry.ExitCode == nil
 	case "installed":
 		return entry, entry.Phase == "apply" && updateVersion.MatchString(entry.Version) && entry.ExitCode == nil
 	case "no-update", "completed":
 		return entry, entry.Phase == "apply" && entry.Version == "" && entry.ExitCode == nil
 	case "failed":
-		return entry, entry.Version == "" && (entry.Phase == "prerequisites" || entry.Phase == "recovery" || entry.Phase == "apply")
+		return entry, entry.Version == "" && (entry.Phase == "prerequisites" || entry.Phase == "recovery" || entry.Phase == "policy" || entry.Phase == "apply")
 	default:
 		return updateEntry{}, false
 	}

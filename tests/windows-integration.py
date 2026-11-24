@@ -317,6 +317,8 @@ def test(args, root):
         }
         if args.admin_dir:
             settings["adminDir"] = str(args.admin_dir)
+        if args.browser_qa:
+            settings["manageAutomaticUpdates"] = True
         config.write_text(json.dumps(settings), encoding="utf-8")
         log = stack.enter_context((root / "server.log").open("w", encoding="utf-8"))
         agent_log = stack.enter_context((root / "agent.log").open("w", encoding="utf-8"))
@@ -486,15 +488,18 @@ def test(args, root):
                 {"outcome": "installed", "phase": "apply", "version": "1.2.3"},
                 {"outcome": "failed", "phase": "recovery", "exitCode": 7},
                 {"outcome": "no-update", "phase": "apply"},
+                {"outcome": "paused", "phase": "policy"},
             )
             for index, record in enumerate(records, 1):
                 (history / f"{index:021d}-{index:032x}.json").write_text(
                     json.dumps({"startedAt": 1720000000, "finishedAt": 1720000010, **record}), encoding="utf-8"
                 )
-            (history / f"{4:021d}-{4:032x}.json").write_text('{"outcome":"unknown"}', encoding="utf-8")
+            (history / f"{5:021d}-{5:032x}.json").write_text('{"outcome":"unknown"}', encoding="utf-8")
             request(api, "GET", "/api/v1/admin/update-history", expected=401)
             entries, _ = request(api, "GET", "/api/v1/admin/update-history", token=admin)
-            assert [entry["outcome"] for entry in entries] == ["no-update", "failed", "installed"], entries
+            assert [entry["outcome"] for entry in entries] == ["paused", "no-update", "failed", "installed"], entries
+            request(api, "PUT", "/api/v1/admin/update-policy", {"paused": True}, expected=401)
+            change("PUT", "update-policy", {"paused": None}, 400)
             link = change("POST", "invites", {"userId": user, "label": "Chromium QA", "transport": "browser"}, 201)["link"]
             browser_env = {
                 **env, "HOMEPROXY_QA_API": f"http://{address(api)}", "HOMEPROXY_QA_INVITE": link,
@@ -507,6 +512,7 @@ def test(args, root):
             if browser_run.returncode:
                 print(browser_run.stderr, flush=True)
                 browser_run.check_returncode()
+            assert not (root / "store.sqlite.updates-paused").exists()
 
         terminate(server)
         eventual(lambda: ctl("status")["route"]["selected"] == "backup-0", "offline backup")

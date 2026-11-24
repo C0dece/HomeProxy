@@ -73,6 +73,12 @@ try {
   await admin.getByRole('button', { name: 'Сохранить', exact: true }).click()
   await admin.getByText('app.homeproxy.qa', { exact: true }).waitFor()
 
+  async function controller(command, data = null) {
+    const { stdout } = await run(env.HOMEPROXY_QA_AGENT,
+      ['ctl', '--data', env.HOMEPROXY_QA_STATE, '--port', env.HOMEPROXY_QA_CTL, '--command', command, '--json', JSON.stringify(data)],
+      { windowsHide: true, timeout: 20000 })
+    return JSON.parse(stdout)
+  }
   const site = await context.newPage()
   await site.goto(`http://127.0.0.1:${env.HOMEPROXY_QA_ORIGIN_PORT}/probe`)
   await site.bringToFront()
@@ -88,6 +94,8 @@ try {
   await popup.getByRole('button', { name: 'Включить маршрутизацию' }).click()
   await popup.getByRole('button', { name: 'Выключить маршрутизацию' }).waitFor()
   await popup.close()
+  const synced = await controller('sync')
+  assert.ok(synced.linked && synced.online && !synced.error, 'Agent did not synchronize browser test rules')
 
   await site.goto(target)
   await site.getByRole('heading', { name: 'HomeProxy QA' }).waitFor()
@@ -104,7 +112,16 @@ try {
   await popup.locator('#action').selectOption('PROXY')
   await popup.getByRole('button', { name: 'Сохранить правило' }).click()
   await popup.getByText('Через прокси · LOCAL', { exact: true }).waitFor()
-  await site.goto(target + '?proxy=1')
+  // Chromium may still use the previous PAC result while the network service applies the new configuration.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await site.goto(target + '?proxy=' + attempt, { timeout: 5000 })
+      break
+    } catch (error) {
+      if (attempt >= 4 || !/ERR_PROXY_CONNECTION_FAILED|ERR_HTTP_RESPONSE_CODE_FAILURE|ERR_BLOCKED_BY_CLIENT|ERR_UNSAFE_PORT/.test(String(error))) throw error
+      await new Promise(resolve => setTimeout(resolve, 350))
+    }
+  }
   await site.getByRole('heading', { name: 'HomeProxy QA' }).waitFor()
   await popup.getByRole('button', { name: 'Выключить маршрутизацию' }).click()
   await popup.getByRole('button', { name: 'Включить маршрутизацию' }).waitFor()
@@ -120,12 +137,7 @@ try {
   await new Promise(resolve => web.once('listening', resolve))
   const agent = await context.newPage()
   await agent.setViewportSize({ width: 820, height: 760 })
-  await agent.exposeFunction('agentQA', async (command, data) => {
-    const { stdout } = await run(env.HOMEPROXY_QA_AGENT,
-      ['ctl', '--data', env.HOMEPROXY_QA_STATE, '--port', env.HOMEPROXY_QA_CTL, '--command', command, '--json', JSON.stringify(data)],
-      { windowsHide: true, timeout: 20000 })
-    return JSON.parse(stdout)
-  })
+  await agent.exposeFunction('agentQA', controller)
   await agent.addInitScript(() => {
     window.__TAURI_INTERNALS__ = { invoke: (_, { command, data }) => window.agentQA(command, data) }
   })

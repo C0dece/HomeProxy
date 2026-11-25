@@ -122,6 +122,8 @@ pub struct Proxy {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Configuration {
+    #[serde(default)]
+    pub client_updates_paused: bool,
     pub api: u32,
     pub device_id: String,
     pub revision: u64,

@@ -97,7 +97,10 @@ const result = new Promise((resolve, reject) => {
   socket.addEventListener('message', ({ data }) => {
     const reply = JSON.parse(data)
     if (reply.id !== 1) return
-    if (reply.error || reply.result?.exceptionDetails) reject(new Error('Android command failed'))
+    const failure = reply.result?.exceptionDetails
+    if (reply.error || failure) {
+      reject(new Error(failure?.exception?.description ?? failure?.exception?.value ?? reply.error?.message ?? 'Android command failed'))
+    }
     else resolve(reply.result.result.value)
   })
 })

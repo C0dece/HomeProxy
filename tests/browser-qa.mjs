@@ -48,6 +48,9 @@ try {
   const windowsDevice = admin.getByRole('row').filter({ hasText: 'Agent QA' })
   await windowsDevice.getByText('Windows', { exact: true }).waitFor()
   await windowsDevice.getByText(/^\d+\.\d+\.\d+$/).waitFor()
+  await admin.getByRole('button', { name: 'Приостановить у клиентов', exact: true }).click()
+  await admin.getByRole('button', { name: 'Возобновить у клиентов', exact: true }).click()
+  await admin.getByRole('button', { name: 'Приостановить у клиентов', exact: true }).waitFor()
   await admin.getByRole('button', { name: 'Приостановить', exact: true }).click()
   await admin.getByText('На паузе', { exact: true }).waitFor()
   const [policyAfterRefresh] = await Promise.all([

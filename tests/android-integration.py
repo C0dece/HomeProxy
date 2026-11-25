@@ -343,6 +343,19 @@ def test(args, root):
                          if row["label"] == "Android emulator" and row["platform"] == "android"
                          and row["installedVersion"] == apk_version), None)
         loopback.eventual(reported_version, "Android installed version report")
+        change("PUT", "client-update-policy", {"paused": True})
+        ctl("sync")
+        assert ctl("update-status")["paused"]
+        for command, payload in (("update-check", {"channel": "stable"}), ("update-confirm", None)):
+            try:
+                ctl(command, payload)
+                raise AssertionError(f"Paused Android accepted {command}")
+            except subprocess.CalledProcessError as error:
+                assert "Администратор приостановил обновления" in error.stderr, error.stderr
+        change("PUT", "client-update-policy", {"paused": False})
+        ctl("sync")
+        assert not ctl("update-status")["paused"]
+        print("PASS Android applied and released the administrator update pause", flush=True)
         print("PASS Android link, permission, TUN and real VLESS + REALITY traffic", flush=True)
         if args.network_vpn:
             loopback.eventual(lambda: proxied(PROBE_APP, DNS_TARGET), "Android DNS through VPN", 22)

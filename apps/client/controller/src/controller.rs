@@ -1,7 +1,7 @@
 use std::{
     io::{ErrorKind, Read},
     net::TcpListener,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -48,6 +48,19 @@ struct Stored {
     profile: Profile,
     custom: Action,
     enabled: bool,
+}
+
+pub fn updates_paused(directory: &Path) -> Result<bool, String> {
+    let data = match secure::load(&directory.join("state.dpapi")) {
+        Ok(data) => data,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(_) => return Err("Не удалось прочитать политику обновлений".into()),
+    };
+    let state: Stored =
+        serde_json::from_slice(&data).map_err(|_| "Не удалось прочитать политику обновлений")?;
+    Ok(state
+        .remote
+        .is_some_and(|config| config.client_updates_paused))
 }
 
 impl Default for Stored {
@@ -527,6 +540,7 @@ impl Controller {
             "tun": self.options.tun,
             "strict": self.options.strict,
             "revision": remote.map(|r| r.revision),
+            "clientUpdatesPaused": remote.is_some_and(|r| r.client_updates_paused),
             "ack": self.state.previous_ack,
             "proxyPort": self.ports.proxy,
             "profile": self.state.profile,

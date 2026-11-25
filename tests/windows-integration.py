@@ -439,6 +439,11 @@ def test(args, root):
         assert proxied(local, origin.server_port)
         eventual(lambda: reported("Agent QA")["installedVersion"], "Windows installed version report")
         assert reported("Agent QA")["platform"] == "windows"
+        request(api, "PUT", "/api/v1/admin/client-update-policy", {"paused": True}, token=other_key, expected=401)
+        assert change("PUT", "client-update-policy", {"paused": True}) == {"paused": True}
+        assert ctl("sync")["clientUpdatesPaused"]
+        assert change("PUT", "client-update-policy", {"paused": False}) == {"paused": False}
+        assert not ctl("sync")["clientUpdatesPaused"]
         print("PASS registration, scoped configuration, REALITY and authenticated CONNECT", flush=True)
         if named_host:
             status = ctl("sync")

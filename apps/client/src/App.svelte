@@ -18,7 +18,7 @@
     route: { selected: string | null; fallback: boolean; serverDirectAvailable: boolean; candidates: Candidate[] }
   }
   type Update = {
-    configured: boolean; installed: string; allowed: boolean; active: boolean; confirm: boolean;
+    configured: boolean; installed: string; allowed: boolean; active: boolean; confirm: boolean; paused?: boolean;
     notice: string | null; offer: { channel: string; version: string; size: number | null; notes: string | null } | null;
   }
   let data = $state<Status>()
@@ -160,7 +160,10 @@
     {#if update}
       <section class="card stack">
         <p class="label">Установлена версия <code>{update.installed}</code></p>
-        {#if update.configured}
+        {#if update.paused}
+          <p class="notice warning" role="status">Администратор приостановил обновления.</p>
+          {#if update.active}<button disabled={busy} onclick={() => run('update-cancel')}>Отменить установку</button>{/if}
+        {:else if update.configured}
           <label>Канал<select bind:value={channel} disabled={busy || update.active}>
             <option value="stable">STABLE</option><option value="beta">BETA</option><option value="dev">DEV</option>
           </select></label>

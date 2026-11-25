@@ -18,7 +18,8 @@
   const eventNames: Record<string, string> = {
     'user.created': 'Создан пользователь', 'proxy.saved': 'Сохранён прокси', 'proxy.deleted': 'Удалён прокси',
     'device.invited': 'Создана ссылка', 'device.connected': 'Устройство подключено', 'device.revoked': 'Доступ отозван',
-    'rule.saved': 'Сохранено правило', 'rule.deleted': 'Удалено правило', 'routes.saved': 'Назначены прокси'
+    'rule.saved': 'Сохранено правило', 'rule.deleted': 'Удалено правило', 'routes.saved': 'Назначены прокси',
+    'client-update-policy.saved': 'Изменена политика обновлений клиентов'
   }
   const deviceStates: Record<string, string> = { connected: 'Подключено', invited: 'Ожидает', revoked: 'Отозвано' }
   const releasePlatforms = { windows: 'Windows', android: 'Android', browser: 'Расширение' }
@@ -55,6 +56,7 @@
   let serverRelease = $state<{ version: string; api: number; dbSchema: number } | null>(null)
   let updateHistory = $state<Promise<UpdateEntry[] | null>>()
   let updatePolicy = $state<Promise<UpdatePolicy | null>>()
+  let clientUpdatePolicy = $state<Promise<{ paused: boolean } | null>>()
   let title = $derived(views.find(item => item.id === view)?.label)
   let active = $derived(data?.devices.filter(d => d.status === 'connected').length ?? 0)
 
@@ -80,12 +82,20 @@
   function loadUpdates() {
     updateHistory = admin<UpdateEntry[]>(token, 'update-history').catch(() => null)
     updatePolicy = admin<UpdatePolicy>(token, 'update-policy').catch(() => null)
+    clientUpdatePolicy = admin<{ paused: boolean }>(token, 'client-update-policy').catch(() => null)
   }
   function setUpdatesPaused(paused: boolean) {
     void task(async () => {
       const key = token
       const policy = await admin<UpdatePolicy>(key, 'update-policy', 'PUT', { paused })
       if (token === key && view === 'updates') updatePolicy = Promise.resolve(policy)
+    })
+  }
+  function setClientUpdatesPaused(paused: boolean) {
+    void task(async () => {
+      const key = token
+      const policy = await admin<{ paused: boolean }>(key, 'client-update-policy', 'PUT', { paused })
+      if (token === key && view === 'updates') clientUpdatePolicy = Promise.resolve(policy)
     })
   }
   async function task(work: () => Promise<void>) {
@@ -102,7 +112,7 @@
   function navigate(next: typeof view) {
     view = next; search = ''; error = ''; message = ''
     if (next === 'updates') loadUpdates()
-    else { updateHistory = undefined; updatePolicy = undefined }
+    else { updateHistory = undefined; updatePolicy = undefined; clientUpdatePolicy = undefined }
   }
   function open(type: Dialog, item?: Proxy | Rule) {
     error = ''; message = ''; dialog = type; link = ''; label = ''; transport = 'agent'; candidate = ''
@@ -323,6 +333,21 @@
                 <div class="between">
                   <span class="badge" class:wait={policy.paused} class:ok={!policy.paused}>{policy.paused ? 'На паузе' : 'Разрешены'}</span>
                   <button disabled={busy} onclick={() => setUpdatesPaused(!policy.paused)}>{policy.paused ? 'Возобновить' : 'Приостановить'}</button>
+                </div>
+              {/if}
+            {/await}
+          </section>
+          <section class="card stack">
+            <h2>Обновления Windows и Android</h2>
+            {#await clientUpdatePolicy}
+              <p class="muted" role="status">Загрузка политики…</p>
+            {:then policy}
+              {#if !policy}
+                <p class="notice error" role="alert">Политика клиентов недоступна.</p>
+              {:else}
+                <div class="between">
+                  <span class="badge" class:wait={policy.paused} class:ok={!policy.paused}>{policy.paused ? 'На паузе' : 'Разрешены'}</span>
+                  <button disabled={busy} onclick={() => setClientUpdatesPaused(!policy.paused)}>{policy.paused ? 'Возобновить у клиентов' : 'Приостановить у клиентов'}</button>
                 </div>
               {/if}
             {/await}

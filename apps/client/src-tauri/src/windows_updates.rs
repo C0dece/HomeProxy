@@ -12,6 +12,7 @@ use url::Url;
 
 const ENDPOINT: Option<&str> = option_env!("HOMEPROXY_WINDOWS_UPDATE_ENDPOINT");
 const PUBLIC_KEY: Option<&str> = option_env!("HOMEPROXY_WINDOWS_UPDATE_KEY");
+const PAUSED: &str = "Администратор приостановил обновления";
 
 struct Offer {
     channel: String,
@@ -52,6 +53,14 @@ pub(crate) async fn command<R: tauri::Runtime>(
     let state = app.state::<WindowsUpdates>();
     let mut offer = state.offer.lock().await;
     let mut notice = None;
+    let directory = default_dir()?;
+    let paused = homeproxy_agent::controller::updates_paused(&directory)?;
+    if paused {
+        *offer = None;
+        if !matches!(command, "update-status" | "update-cancel") {
+            return Err(PAUSED.into());
+        }
+    }
     match command {
         "update-status" => {}
         "update-check" => {
@@ -124,6 +133,13 @@ pub(crate) async fn command<R: tauri::Runtime>(
             let stopped = tauri::async_runtime::spawn_blocking(stop_controller)
                 .await
                 .map_err(|_| "Не удалось остановить контроллер")??;
+            let policy = homeproxy_agent::controller::updates_paused(&directory);
+            if !matches!(policy, Ok(false)) {
+                if stopped {
+                    resume_controller().await?;
+                }
+                return Err(policy.err().unwrap_or_else(|| PAUSED.into()));
+            }
             if selected.update.install(bytes).is_err() {
                 if stopped {
                     resume_controller().await?;
@@ -144,6 +160,7 @@ pub(crate) async fn command<R: tauri::Runtime>(
         "configured": ENDPOINT.is_some() && PUBLIC_KEY.is_some(),
         "installed": app.package_info().version.to_string(),
         "allowed": true,
+        "paused": paused,
         "active": active, "confirm": active,
         "notice": notice.or(active.then_some("Пакет проверен и готов к установке")),
         "offer": offer.as_ref().map(|entry| json!({

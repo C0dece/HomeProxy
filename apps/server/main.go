@@ -224,6 +224,9 @@ func migrate(db *sql.DB) error {
 	if _, err = tx.Exec(createDeviceReports); err != nil {
 		return err
 	}
+	if _, err = tx.Exec(createClientUpdatePolicy); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -292,6 +295,8 @@ func (s *server) handler() http.Handler {
 	r.HandleFunc("GET /api/v1/admin/update-history", s.admin(s.updateHistory))
 	r.HandleFunc("GET /api/v1/admin/update-policy", s.admin(s.updatePolicy))
 	r.HandleFunc("PUT /api/v1/admin/update-policy", s.admin(s.updatePolicy))
+	r.HandleFunc("GET /api/v1/admin/client-update-policy", s.admin(s.clientUpdatePolicy))
+	r.HandleFunc("PUT /api/v1/admin/client-update-policy", s.admin(s.clientUpdatePolicy))
 	r.HandleFunc("POST /api/v1/admin/users", s.admin(s.user))
 	r.HandleFunc("PUT /api/v1/admin/proxies", s.admin(s.proxy))
 	r.HandleFunc("DELETE /api/v1/admin/proxies/{id}", s.admin(s.deleteProxy))

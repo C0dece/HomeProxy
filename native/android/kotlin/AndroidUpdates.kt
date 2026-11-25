@@ -53,9 +53,17 @@ internal object AndroidUpdates {
     private fun sessions(context: Context) = context.packageManager.packageInstaller.mySessions
         .filter { it.appPackageName == context.packageName }
 
+    private fun paused(context: Context) =
+        HomeStore(context).read().optJSONObject("remote")?.optBoolean("clientUpdatesPaused") == true
+
+    private fun requireUpdatesAllowed(context: Context) {
+        if (paused(context)) throw MobileFailure("Администратор приостановил обновления")
+    }
+
     fun status(context: Context): JSONObject = JSONObject()
         .put("configured", source(context) != null)
         .put("installed", installedVersion(context))
+        .put("paused", paused(context))
         .put("allowed", context.packageManager.canRequestPackageInstalls())
         .put("active", sessions(context).isNotEmpty())
         .put("confirm", confirmation != null)
@@ -65,6 +73,7 @@ internal object AndroidUpdates {
         } ?: JSONObject.NULL)
 
     fun check(context: Context, channel: String): JSONObject {
+        requireUpdatesAllowed(context)
         offer = null
         notice = null
         if (channel !in channels) throw MobileFailure("Неизвестный канал обновлений")
@@ -161,6 +170,7 @@ internal object AndroidUpdates {
     }
 
     fun install(context: Context, channel: String, version: String): JSONObject {
+        requireUpdatesAllowed(context)
         val next = offer?.takeIf { it.channel == channel && it.version == version }
             ?: throw MobileFailure("Сначала проверьте обновления")
         if (!context.packageManager.canRequestPackageInstalls()) throw MobileFailure("Разрешите установки в настройках Android")
@@ -186,6 +196,7 @@ internal object AndroidUpdates {
                 throw MobileFailure("Контрольная сумма APK не совпадает")
             }
             verifyApk(context, cache, next)
+            requireUpdatesAllowed(context)
             stage(context, cache, next.size)
         } finally {
             cache.delete()
@@ -233,7 +244,10 @@ internal object AndroidUpdates {
         }
     }
 
-    fun confirmation(): Intent = confirmation?.let(::Intent) ?: throw MobileFailure("Android ещё не запросил подтверждение")
+    fun confirmation(context: Context): Intent {
+        requireUpdatesAllowed(context)
+        return confirmation?.let(::Intent) ?: throw MobileFailure("Android ещё не запросил подтверждение")
+    }
 
     fun cancel(context: Context): JSONObject {
         val installer = context.packageManager.packageInstaller

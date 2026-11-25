@@ -67,7 +67,7 @@ class HomeProxyPlugin(private val activity: Activity) : Plugin(activity) {
         if (command == "update-permission" || command == "update-confirm") {
             activity.runOnUiThread {
                 try {
-                    val target = if (command == "update-confirm") AndroidUpdates.confirmation() else Intent(
+                    val target = if (command == "update-confirm") AndroidUpdates.confirmation(activity.applicationContext) else Intent(
                         Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.fromParts("package", activity.packageName, null)
                     )
                     activity.startActivity(target)

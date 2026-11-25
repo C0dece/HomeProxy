@@ -500,6 +500,11 @@ func (s *server) config(w http.ResponseWriter, r *http.Request) {
 	})
 	result := obj{"api": 1, "deviceId": d.id, "revision": rev, "rules": policies}
 	if d.transport == "agent" {
+		paused, err := clientUpdatesPaused(tx)
+		if report(w, err) {
+			return
+		}
+		result["clientUpdatesPaused"] = paused
 		backups, err := s.proxies(tx, d.userID)
 		if report(w, err) {
 			return

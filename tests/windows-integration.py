@@ -54,7 +54,7 @@ class NamedApiProxy(http.server.BaseHTTPRequestHandler):
     def forward(self):
         size = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(size) if size else None
-        headers = {name: self.headers[name] for name in ("Authorization", "Content-Type", "If-None-Match")
+        headers = {name: self.headers[name] for name in ("Authorization", "Content-Type", "If-None-Match", "X-HomeProxy-Version")
                    if name in self.headers}
         with contextlib.closing(http.client.HTTPConnection("127.0.0.1", self.server.api_port, timeout=4)) as api:
             try:

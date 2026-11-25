@@ -3,7 +3,7 @@
   import { invoke } from '@tauri-apps/api/core'
   import { onMount } from 'svelte'
   import Brand from '../../../packages/ui/Brand.svelte'
-  import { actionNames, profileNames, scopeOf } from '../../../packages/shared/models'
+  import { actionNames, profileNames } from '../../../packages/shared/models'
   import type { Action, Profile, Rule } from '../../../packages/shared/models'
 
   type Candidate = { tag: string; name: string; available: boolean }
@@ -37,6 +37,7 @@
   let apps = $state<Application[]>([])
   let appSearch = $state('')
   let appPattern = $state('')
+  let appIdentifier = $state<HTMLInputElement>()
   let appAction = $state<Action>('PROXY')
   let appScope = $state<'LOCAL' | 'PERSONAL'>('LOCAL')
   let explanation = $state<{ action: Action; scope: string; rule: Rule | null }>()
@@ -49,6 +50,15 @@
   let localApps = $derived((data?.rules ?? []).filter(rule => rule.kind === appKind))
   let excludedApps = $derived(data?.excludedApps ?? [])
   const siteRule = (rule: Rule) => rule.kind === 'domain' || rule.kind === 'suffix'
+  const profileDetails: Record<Profile, string> = {
+    AUTO: 'Сначала через сервер HomeProxy. При сбое Agent подключается к прокси провайдера с этого устройства.',
+    HOME_SERVER: 'Трафик прокси проходит через сервер HomeProxy.',
+    DIRECT_HTTP: 'Agent подключается к прокси провайдера с этого устройства.',
+    DIRECT_INTERNET: 'По умолчанию используется интернет этого устройства.',
+    CUSTOM: 'Выберите маршрут для трафика, для которого нет отдельного правила.'
+  }
+  const scopeLabel = (rule: Rule) => rule.locked ? 'Обязательное правило'
+    : !rule.id ? 'На этом устройстве' : rule.userId ? 'На моих устройствах' : 'Для всех пользователей'
   let selected = $derived(data?.route.candidates.find(c => c.tag === data?.route.selected))
   let actual = $derived(!data?.enabled ? (data?.alwaysOn ? 'Ожидание VPN' : 'Отключено')
     : data.profile === 'CUSTOM' && data.custom === 'BLOCK' ? 'Блокировка'
@@ -123,11 +133,15 @@
     const matches = (rule: Rule) => rule.pattern === id && rule.action !== 'INHERIT'
     return localApps.find(matches) ?? syncedApps.find(rule => rule.userId && matches(rule)) ?? syncedApps.find(matches)
   }
-  function selectPackage(id: string) {
+  function selectApp(id: string, rule = applicationRule(id)) {
     appPattern = id
-    const rule = applicationRule(id)
     appAction = rule?.action ?? 'PROXY'
     appScope = rule?.userId ? 'PERSONAL' : 'LOCAL'
+  }
+  function editAppRule(rule: Rule, pending = false) {
+    selectApp(rule.pattern, rule)
+    if (pending) appScope = 'PERSONAL'
+    appIdentifier?.focus()
   }
   function excludePackage() {
     const name = appPattern.trim()
@@ -228,11 +242,14 @@
       <section class="card stack">
         <div class="between">
           <div class="flex"><span class="mark"><Cable size={20} /></span><div class="card-head"><small class="muted">Маршрут по умолчанию</small><h2>{actual}</h2></div></div>
-          {#if data.route.fallback && actual === selected?.name}<span class="badge wait">Активен резерв</span>{/if}
+          {#if data.route.fallback && actual === selected?.name}<span class="badge wait">Прокси напрямую с устройства</span>{/if}
         </div>
-        {#if !android}<p class="label">Локальный прокси <code>127.0.0.1:{data.proxyPort}</code></p>{/if}
+        {#if !android && !data.tun}
+          <p class="label">Укажите HTTP-прокси <code>127.0.0.1:{data.proxyPort}</code> в приложениях, трафик которых должен проходить через Agent.</p>
+        {/if}
         <form class="stack" onsubmit={event => { event.preventDefault(); void run('profile', { profile, action: custom }) }}>
-          <label>Профиль <select bind:value={profile}>{#each Object.entries(profileNames) as [id, name]}<option value={id}>{name}</option>{/each}</select></label>
+          <label>Режим подключения<select bind:value={profile}>{#each Object.entries(profileNames) as [id, name]}<option value={id}>{name}</option>{/each}</select></label>
+          <p class="label">{profileDetails[profile]}</p>
           {#if profile === 'CUSTOM'}<label>Маршрут <select bind:value={custom}>{#each ['PROXY', 'LOCAL_DIRECT', 'SERVER_DIRECT', 'BLOCK'] as id}<option value={id}>{actionNames[id as Action]}</option>{/each}</select></label>{/if}
           <button class="primary" disabled={busy || profile === data.profile && custom === data.custom}>Применить профиль</button>
         </form>
@@ -253,7 +270,7 @@
         <form class="stack" onsubmit={updateRule}>
           <label>Домен<input required placeholder="example.com" bind:value={pattern} /></label>
           <div class="field-row">
-            <label>Область<select bind:value={scope}><option value="LOCAL">LOCAL</option><option value="PERSONAL">PERSONAL</option></select></label>
+            <label>Где действует<select bind:value={scope}><option value="LOCAL">На этом устройстве</option><option value="PERSONAL">На моих устройствах</option></select></label>
             <label>Тип<select bind:value={kind}><option value="domain">Точный домен</option><option value="suffix">С поддоменами</option></select></label>
           </div>
           <label>Маршрут<select bind:value={action}>{#each Object.entries(actionNames) as [id, name]}<option value={id}>{name}</option>{/each}</select></label>
@@ -264,7 +281,7 @@
         <h2>Действующие правила</h2>
         {#each [...data.rules, ...(data.remoteRules ?? [])].filter(siteRule) as rule}
           <div class="between item">
-            <div class="card-head"><span class="mono">{rule.pattern}</span><small class="muted">{scopeOf(rule)} · {actionNames[rule.action]}</small></div>
+            <div class="card-head"><span class="mono">{rule.pattern}</span><small class="muted">{scopeLabel(rule)} · {actionNames[rule.action]}</small></div>
             {#if !rule.id}<button class="small ghost" aria-label={'Удалить ' + rule.pattern} onclick={() => run('local-rule', { ...rule, action: 'INHERIT' })}><Trash2 size={15} /></button>{/if}
           </div>
         {:else}<p class="muted">Правил сайтов пока нет.</p>{/each}
@@ -279,39 +296,35 @@
           <h2>Правило приложения</h2>
           <button class="small" disabled={busy} onclick={() => run('list-apps')}><RefreshCw size={15} /> {android ? 'Обновить список' : 'Обновить процессы'}</button>
         </div>
-        {#if android}
-          <label>Поиск приложения<input type="search" bind:value={appSearch} /></label>
+        {#if !android && !data.tun}
+          <p class="notice">Прокси в приложении: <code>127.0.0.1:{data.proxyPort}</code>. Правило выбирает маршрут для трафика, который приложение отправило в Agent.</p>
+        {/if}
+          <label>{android ? 'Поиск приложения' : 'Поиск запущенного приложения'}<input type="search" bind:value={appSearch}
+            placeholder={android ? 'Введите название' : 'Имя или путь EXE'} /></label>
           <div class="application-list">
             {#each filteredApps as item (item.path)}
               {@const rule = applicationRule(item.path)}
-              <button type="button" class="app-choice" aria-pressed={appPattern === item.path} onclick={() => selectPackage(item.path)}>
+              <button type="button" class="app-choice" aria-pressed={appPattern === item.path} onclick={() => selectApp(item.path)}>
                 {#if item.icon}<img src={item.icon} alt="" width="32" height="32" />{:else}<Monitor size={24} />{/if}
                 <span class="card-head">
                   <strong>{item.name}</strong>
-                  <small class="muted mono">{item.path}</small>
-                  <small class="muted">{data.exclusionsAllowed && excludedApps.includes(item.path)
-                    ? (data.lockdown ? 'Вне VPN · Android блокирует' : 'Вне VPN · LOCAL')
-                    : rule ? scopeOf(rule) + ' · ' + actionNames[rule.action] : 'По профилю VPN'}</small>
+                  <small class="muted mono app-path" title={item.path}>{item.path}</small>
+                  {#if data.exclusionsAllowed && excludedApps.includes(item.path)}
+                    <small class="muted">{data.lockdown ? 'Вне VPN · Android блокирует' : 'Вне VPN на этом устройстве'}</small>
+                  {:else if rule}
+                    <small class="muted">{scopeLabel(rule)} · {actionNames[rule.action]}</small>
+                  {/if}
                 </span>
               </button>
             {:else}
               <p class="muted">{busy ? 'Загрузка приложений…' : 'Приложения не найдены.'}</p>
             {/each}
           </div>
-        {:else}
-          <p class="label">{data.tun ? 'Правило применяется в системном туннеле Windows.' : 'Правило действует, когда приложение использует локальный прокси HomeProxy.'}</p>
-        {/if}
         <form class="stack" onsubmit={updateAppRule}>
-          {#if !android}
-            <label>Запущенное приложение<select onchange={event => appPattern = event.currentTarget.value}>
-              <option value="">Выберите процесс</option>
-              {#each apps as item (item.path)}<option value={item.path}>{item.name} · {item.path}</option>{/each}
-            </select></label>
-          {/if}
           <label>{android ? 'Имя пакета' : 'Имя или путь EXE'}<input required maxlength={android ? 255 : 1024}
-            placeholder={android ? 'com.example.app' : 'example.exe'} bind:value={appPattern} autocapitalize="none" /></label>
+            placeholder={android ? 'com.example.app' : 'example.exe'} bind:this={appIdentifier} bind:value={appPattern} autocapitalize="none" /></label>
           <div class="field-row">
-            <label>Область<select bind:value={appScope}><option value="LOCAL">LOCAL</option><option value="PERSONAL">PERSONAL</option></select></label>
+            <label>Где действует<select bind:value={appScope}><option value="LOCAL">На этом устройстве</option><option value="PERSONAL">На моих устройствах</option></select></label>
             <label>Маршрут<select bind:value={appAction}>{#each Object.entries(actionNames) as [id, name]}<option value={id}>{name}</option>{/each}</select></label>
           </div>
           <button class="primary" disabled={busy}>Сохранить правило</button>
@@ -321,13 +334,21 @@
         <h2>Правила приложений</h2>
         {#each [...localApps, ...syncedApps] as rule}
           <div class="between item">
-            <div class="card-head"><span class="mono">{rule.pattern}</span><small class="muted">{scopeOf(rule)} · {actionNames[rule.action]}</small></div>
-            {#if !rule.id}<button class="small ghost" aria-label={'Удалить ' + rule.pattern} onclick={() => run('local-rule', { ...rule, action: 'INHERIT' })}><Trash2 size={15} /></button>{/if}
+            <div class="card-head"><span class="mono">{rule.pattern}</span><small class="muted">{scopeLabel(rule)} · {actionNames[rule.action]}</small></div>
+            <div class="flex">
+              {#if !rule.id || rule.userId && !rule.locked}
+                <button class="small" onclick={() => editAppRule(rule)}>Редактировать</button>
+              {/if}
+              {#if !rule.id}<button class="small ghost" aria-label={'Удалить ' + rule.pattern} onclick={() => run('local-rule', { ...rule, action: 'INHERIT' })}><Trash2 size={15} /></button>{/if}
+            </div>
           </div>
         {:else}<p class="muted">Правил приложений пока нет.</p>{/each}
         {#each data.pending.filter(rule => rule.kind === appKind) as rule}
-          <div class="between item"><span class="mono">{rule.pattern}</span><span class="badge wait">В очереди</span>
-            <button class="small" onclick={() => run('discard-pending', rule)}>Отменить отправку</button></div>
+          <div class="between item"><span class="mono">{rule.pattern}</span><span class="badge wait">Ожидает отправки</span>
+            <div class="flex">
+              <button class="small" onclick={() => editAppRule(rule, true)}>Пересмотреть</button>
+              <button class="small" onclick={() => run('discard-pending', rule)}>Отменить отправку</button>
+            </div></div>
         {/each}
       </section>
       {#if android}
@@ -381,11 +402,12 @@
   nav button.current { background: #223355; border-color: #344c79; color: #b7caff; }
   .item { border-bottom: 1px solid var(--border); padding-bottom: 12px; }
   .policy-status { gap: 8px; }
-  .application-list { display: flex; flex-direction: column; gap: 6px; max-height: 18rem; overflow-y: auto; }
+  .application-list { display: flex; flex-direction: column; gap: 6px; max-height: 15rem; overflow: auto; }
   .app-choice { flex: none; justify-content: flex-start; text-align: left; min-width: 0; }
   .app-choice[aria-pressed="true"] { background: #223355; border-color: var(--accent); }
   .app-choice img { flex: none; }
   .app-choice .card-head { min-width: 0; overflow-wrap: anywhere; }
+  .app-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   @media (max-width: 420px) {
     .mobile-nav { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .mobile-nav button { padding-inline: 6px; }

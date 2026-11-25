@@ -228,10 +228,19 @@ func (s *server) coreConfig(q queryer) ([]byte, error) {
 	}
 	users := make([]obj, 0, len(accounts)*2)
 	rules := []obj{{"network": "udp", "action": "reject"}}
+	dnsServers := []obj{{"type": "local", "tag": "system"}}
 	outbounds := []obj{{"type": "direct", "tag": "server-direct"}}
 	if !s.cfg.LoopbackDev {
+		resolve := obj{"action": "resolve"}
+		if dns := s.cfg.DestinationDNS; dns != nil {
+			dnsServers = append(dnsServers, obj{
+				"type": "https", "tag": "destination-dns", "server": dns.Address,
+				"tls": obj{"enabled": true, "server_name": dns.ServerName},
+			})
+			resolve["server"] = "destination-dns"
+		}
 		rules = append(rules,
-			obj{"action": "resolve"},
+			resolve,
 			obj{"ip_cidr": []string{"0.0.0.0/8", "100.64.0.0/10", "192.0.0.0/24", "224.0.0.0/3", "fe80::/10", "ff00::/8"}, "action": "reject"},
 			obj{"ip_is_private": true, "action": "reject"})
 	}
@@ -277,7 +286,7 @@ func (s *server) coreConfig(q queryer) ([]byte, error) {
 	return json.Marshal(obj{
 		"log":      obj{"disabled": true},
 		"route":    obj{"rules": rules, "default_domain_resolver": "system"},
-		"dns":      obj{"servers": []obj{{"type": "local", "tag": "system"}}},
+		"dns":      obj{"servers": dnsServers, "final": "system"},
 		"inbounds": inbounds, "outbounds": outbounds,
 		"experimental": obj{"clash_api": obj{"external_controller": s.core.control, "secret": s.core.token}},
 	})

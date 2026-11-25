@@ -20,11 +20,11 @@ export const actionNames: Record<Action, string> = {
 }
 
 export const profileNames: Record<Profile, string> = {
-  AUTO: 'AUTO',
-  HOME_SERVER: 'HOME SERVER',
-  DIRECT_HTTP: 'DIRECT HTTP',
-  DIRECT_INTERNET: 'DIRECT INTERNET',
-  CUSTOM: 'CUSTOM'
+  AUTO: 'Автоматически',
+  HOME_SERVER: 'Только через сервер',
+  DIRECT_HTTP: 'Сразу к прокси провайдера',
+  DIRECT_INTERNET: 'Интернет устройства',
+  CUSTOM: 'Выбрать маршрут вручную'
 }
 
 export function scopeOf(rule: Rule): string {

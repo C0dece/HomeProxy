@@ -22,6 +22,8 @@ Start-Service -Name HomeProxyServer
 
 Публичный вход обслуживает регистрацию, выдачу конфигурации, подтверждение ревизии и личные правила. Admin, её файлы и `/healthz` доступны через приватный вход. Для внешнего REALITY задайте отдельный `tunnelListen` на выбранном интерфейсе и укажите внешний адрес в `tunnelHost` и `tunnelPort`. При настройке маршрутизатора и брандмауэра перенаправляйте клиентские TCP-порты только на адреса из `publicListen` и `tunnelListen`.
 
+Если системный DNS на сервере выдаёт синтетические адреса FakeIP, задайте `"destinationDns": {"address": "1.1.1.1", "serverName": "cloudflare-dns.com"}` в `server.json`. HomeProxy будет разрешать адреса назначения через указанный DNS over HTTPS до проверки диапазонов. Для поиска адреса самого HTTP CONNECT-прокси используется системный DNS.
+
 ## Windows Agent
 
 Сборка Windows с Installer включает homeproxy-desktop.exe, homeproxy-agent.exe и sing-box.exe. В интерфейсе запустите локальный Agent и вставьте ссылку типа Agent. Приложения подключаются к 127.0.0.1:17770 по HTTP или SOCKS5. Закрытие окна Tauri оставляет фоновый процесс. Состояние находится в LocalAppData текущего пользователя. Локальный NSIS собран без Authenticode-подписи.

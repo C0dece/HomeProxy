@@ -45,7 +45,8 @@ const schemaVersion = 2
 var releaseVersion = "0.1.2"
 
 type settings struct {
-	ManageAutomaticUpdates bool `json:"manageAutomaticUpdates"`
+	ManageAutomaticUpdates bool         `json:"manageAutomaticUpdates"`
+	DestinationDNS         *dnsResolver `json:"destinationDns"`
 
 	Listen         string  `json:"listen"`
 	PublicListen   string  `json:"publicListen"`
@@ -66,6 +67,11 @@ type settings struct {
 	ServerName     string  `json:"serverName"`
 	ProbeURL       string  `json:"probeUrl"`
 	LoopbackDev    bool    `json:"loopbackDev"`
+}
+
+type dnsResolver struct {
+	Address    string `json:"address"`
+	ServerName string `json:"serverName"`
 }
 
 type server struct {
@@ -152,6 +158,13 @@ func (c settings) validate() error {
 		}
 		if base.Scheme != "https" || c.CertFile == "" || c.TLSKeyFile == "" {
 			return errors.New("publicListen requires an HTTPS publicUrl, TLS certificate and key")
+		}
+	}
+	if dns := c.DestinationDNS; dns != nil {
+		ip := net.ParseIP(dns.Address)
+		if c.LoopbackDev || ip == nil || !ip.IsGlobalUnicast() || ip.IsPrivate() ||
+			!validHost(dns.ServerName) {
+			return errors.New("destinationDns requires a public resolver IP and TLS name")
 		}
 	}
 	if base.Scheme != "https" && !(c.LoopbackDev && base.Scheme == "http") ||
@@ -325,6 +338,7 @@ func (s *server) handler() http.Handler {
 	r.HandleFunc("GET /api/v1/admin/client-update-policy", s.admin(s.clientUpdatePolicy))
 	r.HandleFunc("PUT /api/v1/admin/client-update-policy", s.admin(s.clientUpdatePolicy))
 	r.HandleFunc("POST /api/v1/admin/users", s.admin(s.user))
+	r.HandleFunc("PUT /api/v1/admin/users/{id}", s.admin(s.user))
 	r.HandleFunc("PUT /api/v1/admin/proxies", s.admin(s.proxy))
 	r.HandleFunc("DELETE /api/v1/admin/proxies/{id}", s.admin(s.deleteProxy))
 	r.HandleFunc("PUT /api/v1/admin/routes", s.admin(s.routes))

@@ -116,20 +116,32 @@ func (s *server) user(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "invalid_name")
 		return
 	}
-	id := uuid()
-	err := s.mutate("user.created", false, func(tx *sql.Tx, _ int64) error {
-		exists := ensure(tx, "SELECT 1 FROM users WHERE name=?", input.Name)
+	id := r.PathValue("id")
+	event := "user.updated"
+	if id == "" {
+		event = "user.created"
+		id = uuid()
+	}
+	err := s.mutate(event, false, func(tx *sql.Tx, _ int64) error {
+		exists := ensure(tx, "SELECT 1 FROM users WHERE name=? AND id<>?", input.Name, id)
 		if !errors.Is(exists, sql.ErrNoRows) {
 			if exists != nil {
 				return exists
 			}
 			return apiError{409, "name_taken"}
 		}
+		if event == "user.updated" {
+			return affected(tx.Exec("UPDATE users SET name=? WHERE id=?", input.Name, id))
+		}
 		_, err := tx.Exec("INSERT INTO users(id,name) VALUES(?,?)", id, input.Name)
 		return err
 	})
 	if !report(w, err) {
-		send(w, 201, obj{"id": id, "name": input.Name})
+		status := http.StatusOK
+		if event == "user.created" {
+			status = http.StatusCreated
+		}
+		send(w, status, obj{"id": id, "name": input.Name})
 	}
 }
 

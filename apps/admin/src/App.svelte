@@ -4,7 +4,7 @@
   import { actionNames, scopeOf } from '../../../packages/shared/models'
   import type { Action, Rule } from '../../../packages/shared/models'
   import { admin } from './api'
-  import type { Proxy, State, UpdateEntry, UpdatePolicy } from './api'
+  import type { Proxy, State, UpdateEntry, UpdatePolicy, User } from './api'
 
   const views = [
     { id: 'overview', label: 'Обзор', icon: LayoutDashboard },
@@ -16,7 +16,8 @@
     { id: 'audit', label: 'Журнал и копии', icon: DatabaseBackup }
   ] as const
   const eventNames: Record<string, string> = {
-    'user.created': 'Создан пользователь', 'proxy.saved': 'Сохранён прокси', 'proxy.deleted': 'Удалён прокси',
+    'user.created': 'Создан пользователь', 'user.updated': 'Изменено имя пользователя',
+    'proxy.saved': 'Сохранён прокси', 'proxy.deleted': 'Удалён прокси',
     'device.invited': 'Создана ссылка', 'device.connected': 'Устройство подключено', 'device.revoked': 'Доступ отозван',
     'rule.saved': 'Сохранено правило', 'rule.deleted': 'Удалено правило', 'routes.saved': 'Назначены прокси',
     'client-update-policy.saved': 'Изменена политика обновлений клиентов'
@@ -48,6 +49,7 @@
   let transport = $state('agent')
   let link = $state('')
   let editingProxy = $state<Proxy>()
+  let editingUser = $state<User>()
   let editingRule = $state<Rule>()
   let ruleKind = $state<Rule['kind']>('domain')
   let selected = $state<string[]>([])
@@ -114,9 +116,10 @@
     if (next === 'updates') loadUpdates()
     else { updateHistory = undefined; updatePolicy = undefined; clientUpdatePolicy = undefined }
   }
-  function open(type: Dialog, item?: Proxy | Rule) {
+  function open(type: Dialog, item?: Proxy | Rule | User) {
     error = ''; message = ''; dialog = type; link = ''; label = ''; transport = 'agent'; candidate = ''
     editingProxy = type === 'proxy' ? item as Proxy | undefined : undefined
+    editingUser = type === 'user' ? item as User | undefined : undefined
     editingRule = type === 'rule' ? item as Rule | undefined : undefined
     ruleKind = editingRule?.kind ?? 'domain'
     userId = editingRule?.userId ?? (type === 'rule' ? '' : data?.users[0]?.id ?? '')
@@ -149,7 +152,10 @@
           id: editingProxy?.id ?? '', name: field('name'), host: field('host'), port: Number(field('port')),
           tls: fields.has('tls'), username: field('username'), password: field('password')
         })
-        if (dialog === 'user') await admin(token, 'users', 'POST', { name: field('name') })
+        if (dialog === 'user') {
+          await admin(token, editingUser ? 'users/' + editingUser.id : 'users',
+            editingUser ? 'PUT' : 'POST', { name: field('name') })
+        }
         if (dialog === 'routes') await admin(token, 'routes', 'PUT', { userId, proxyIds: selected })
         if (dialog === 'rule') await admin(token, 'rules', 'PUT', {
           userId, pattern: field('pattern'), kind: field('kind'), action: field('action') as Action,
@@ -285,13 +291,15 @@
           </section>
         {:else if view === 'users'}
           <section class="card stack">
-            <div class="between"><h2>Учётные записи</h2><input class="search" aria-label="Поиск пользователей" placeholder="Поиск пользователей" bind:value={search} /></div>
+            <div class="between"><h2>Учётные записи HomeProxy</h2><input class="search" aria-label="Поиск пользователей" placeholder="Поиск пользователей" bind:value={search} /></div>
+            <p class="label">Учётная запись объединяет устройства, назначенные прокси и синхронизируемые правила.</p>
             {#if !data.users.length}<p class="empty">Добавьте пользователя, чтобы выдать ему ссылку подключения.</p>
             {:else}<div class="table-scroll"><table>
               <thead><tr><th>Имя</th><th>Назначенные прокси по приоритету</th><th>Действия</th></tr></thead>
               <tbody>{#each data.users.filter(u => matches(u.name)) as user (user.id)}
                 <tr><td data-label="Имя">{user.name}</td><td data-label="Очередь прокси">{data.routes.filter(route => route.userId === user.id).map(route => data?.proxies.find(p => p.id === route.proxyId)?.name).join(', ') || 'Нет назначений'}</td>
-                  <td><div class="flex"><button class="small" onclick={() => { open('routes'); selectUser(user.id) }}>Назначить прокси</button>
+                  <td><div class="flex"><button class="small" onclick={() => open('user', user)}>Изменить имя</button>
+                    <button class="small" onclick={() => { open('routes'); selectUser(user.id) }}>Назначить прокси</button>
                     <button class="small" onclick={() => { open('invite'); selectUser(user.id) }}>Создать ссылку</button></div></td></tr>
               {/each}</tbody>
             </table></div>{/if}
@@ -421,7 +429,7 @@
 {#if connected && data}
   <dialog bind:this={modal} onclose={() => { error = ''; link = '' }}>
     <div class="stack">
-      <div class="between"><h2>{dialogNames[dialog]}</h2><button class="small ghost" aria-label="Закрыть" onclick={() => modal?.close()}><X size={19} /></button></div>
+      <div class="between"><h2>{dialog === 'user' ? (editingUser ? 'Изменить имя' : 'Добавить пользователя') : dialogNames[dialog]}</h2><button class="small ghost" aria-label="Закрыть" onclick={() => modal?.close()}><X size={19} /></button></div>
       {#if error}<p class="notice error" role="alert">{error}</p>{/if}
       {#if link}
         <div class="stack">
@@ -432,7 +440,7 @@
       {:else}
         <form class="stack" onsubmit={save}>
           {#if dialog === 'user'}
-            <label>Имя<input required maxlength="100" name="name" /></label>
+            <label>Имя<input required maxlength="100" name="name" value={editingUser?.name ?? ''} /></label>
           {:else if dialog === 'invite' || dialog === 'routes'}
             <label>Пользователь<select value={userId} onchange={e => selectUser(e.currentTarget.value)} required>{#each data.users as user}<option value={user.id}>{user.name}</option>{/each}</select></label>
             {#if dialog === 'invite'}

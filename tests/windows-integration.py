@@ -189,6 +189,8 @@ def check_split_api(args, root, settings, cert, key, admin, env, flags):
     config.write_text(json.dumps({
         **settings, "listen": address(private), "publicListen": address(public),
         "publicUrl": "https://" + address(public), "certFile": str(cert), "tlsKeyFile": str(key),
+        "loopbackDev": False, "probeUrl": "https://probe.example/ready",
+        "destinationDns": {"address": "1.1.1.1", "serverName": "cloudflare-dns.com"},
         "database": "split.sqlite", "keyFile": "split-vault.key", "realityKeyFile": "split-reality.key",
         "tunnelListen": address(tunnel), "tunnelPort": tunnel,
     }), encoding="utf-8")

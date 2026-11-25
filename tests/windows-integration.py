@@ -164,19 +164,78 @@ def eventual(condition, label, timeout=32):
     raise AssertionError(f"{label} timed out ({type(last).__name__})") from last
 
 
-def request(port, method, path, data=None, token=None, expected=200, headers=None):
+def request(port, method, path, data=None, token=None, expected=200, headers=None, *, tls=None, raw=False):
     headers = (headers or {}).copy()
     if token:
         headers["Authorization"] = "Bearer " + token
     if data is not None:
         headers["Content-Type"] = "application/json"
         data = json.dumps(data)
-    with contextlib.closing(http.client.HTTPConnection("127.0.0.1", port, timeout=25)) as connection:
+    connection = (http.client.HTTPSConnection("127.0.0.1", port, timeout=25, context=tls)
+                  if tls else http.client.HTTPConnection("127.0.0.1", port, timeout=25))
+    with contextlib.closing(connection):
         connection.request(method, path, body=data, headers=headers)
         response = connection.getresponse()
         body = response.read()
         assert response.status == expected, (path, response.status, body[:160])
-        return (json.loads(body) if body else None), response.getheader("ETag")
+        if body and not raw:
+            body = json.loads(body)
+        return body or None, response.getheader("ETag")
+
+
+def check_split_api(args, root, settings, cert, key, admin, env, flags):
+    private, public, tunnel = (new_port() for _ in range(3))
+    config = root / "split.json"
+    config.write_text(json.dumps({
+        **settings, "listen": address(private), "publicListen": address(public),
+        "publicUrl": "https://" + address(public), "certFile": str(cert), "tlsKeyFile": str(key),
+        "database": "split.sqlite", "keyFile": "split-vault.key", "realityKeyFile": "split-reality.key",
+        "tunnelListen": address(tunnel), "tunnelPort": tunnel,
+    }), encoding="utf-8")
+    ca = ssl.create_default_context(cafile=str(cert))
+    command = [args.server, "-config", config]
+    with socket.socket() as occupied:
+        occupied.bind(("127.0.0.1", public))
+        occupied.listen()
+        result = subprocess.run(command, env=env, capture_output=True, creationflags=flags, timeout=15)
+        assert result.returncode != 0 and address(public).encode() in result.stderr, result.stderr
+    with (root / "split.log").open("w", encoding="utf-8") as log:
+        process = subprocess.Popen(command, env=env, stdout=log, stderr=log, creationflags=flags)
+        try:
+            health = eventual(lambda: request(private, "GET", "/healthz", tls=ca)[0], "private TLS health", 10)
+            assert health["ready"] and health["pid"] == process.pid
+            assert b"<html" in request(private, "GET", "/", tls=ca, raw=True)[0].lower()
+            assert request(private, "GET", "/api/v1/admin/state", token=admin, tls=ca)[0]["users"] == []
+            user = request(private, "POST", "/api/v1/admin/users", {"name": "HTTPS QA"},
+                           admin, 201, tls=ca)[0]["id"]
+            invite = request(private, "POST", "/api/v1/admin/invites",
+                             {"userId": user, "label": "HTTPS QA", "transport": "agent"},
+                             admin, 201, tls=ca)[0]["link"]
+            assert invite.startswith(f"https://{address(public)}/connect#")
+            request(public, "GET", "/connect", tls=ca, raw=True)
+            request(public, "GET", "/connect", expected=400, raw=True)
+            for method, path in [("GET", "/"), ("GET", "/healthz"), ("GET", "/api/v1/admin/state"),
+                                 ("GET", "/assets/index.js"), ("POST", "/api/v1/admin/backups")]:
+                request(public, method, path, token=admin, expected=404,
+                        headers={"Host": address(private)}, tls=ca, raw=True)
+            device_key = secrets.token_urlsafe(32)
+            request(public, "POST", "/api/v1/connect",
+                    {"token": invite.split("#")[1], "deviceKey": device_key, "transport": "agent"},
+                    expected=201, tls=ca)
+            config, _ = request(public, "GET", "/api/v1/config", token=device_key, tls=ca)
+            request(public, "POST", "/api/v1/ack", {"revision": config["revision"]}, device_key, 204, tls=ca)
+            rule, _ = request(public, "PUT", "/api/v1/personal-rules",
+                              {"pattern": "blocked.example", "kind": "domain", "action": "BLOCK"},
+                              device_key, tls=ca)
+            assert rule["revision"] > config["revision"]
+        except Exception:
+            print((root / "split.log").read_text(encoding="utf-8"), flush=True)
+            raise
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=6)
+    print("PASS split TLS client API, private Admin and health, and occupied listener recovery", flush=True)
 
 
 def proxied(proxy, target):
@@ -271,7 +330,8 @@ def test(args, root):
 
         cert, key = root / "test.crt", root / "test.key"
         subprocess.run([args.openssl, "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
-                        "-subj", "/CN=localhost", "-keyout", key, "-out", cert],
+                        "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1",
+                        "-keyout", key, "-out", cert],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
         tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         tls.load_cert_chain(cert, key)
@@ -319,6 +379,8 @@ def test(args, root):
             settings["adminDir"] = str(args.admin_dir)
         if args.browser_qa:
             settings["manageAutomaticUpdates"] = True
+        if not args.serve and not args.tun_vm:
+            check_split_api(args, root, settings, cert, key, admin, env, flags)
         config.write_text(json.dumps(settings), encoding="utf-8")
         log = stack.enter_context((root / "server.log").open("w", encoding="utf-8"))
         agent_log = stack.enter_context((root / "agent.log").open("w", encoding="utf-8"))

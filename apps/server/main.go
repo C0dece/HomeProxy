@@ -48,6 +48,7 @@ type settings struct {
 	ManageAutomaticUpdates bool `json:"manageAutomaticUpdates"`
 
 	Listen         string  `json:"listen"`
+	PublicListen   string  `json:"publicListen"`
 	PublicURL      string  `json:"publicUrl"`
 	Database       string  `json:"database"`
 	KeyFile        string  `json:"keyFile"`
@@ -136,6 +137,22 @@ func (c settings) validate() error {
 		}
 	} else if c.CertFile == "" || c.TLSKeyFile == "" {
 		return errors.New("TLS certificate and key are required")
+	}
+	if c.PublicListen != "" {
+		host, port, err := net.SplitHostPort(c.PublicListen)
+		publicPort, _ := strconv.Atoi(port)
+		ip := net.ParseIP(host)
+		if err != nil || !validPort(publicPort) || ip == nil || ip.IsUnspecified() ||
+			ip.IsMulticast() || !isLoopback(listenHost) ||
+			(apiPort == publicPort && ip.Equal(net.ParseIP(listenHost))) {
+			return errors.New("publicListen requires a separate IP listener and a loopback listen")
+		}
+		if c.LoopbackDev && !ip.IsLoopback() {
+			return errors.New("development publicListen must use a loopback IP")
+		}
+		if base.Scheme != "https" || c.CertFile == "" || c.TLSKeyFile == "" {
+			return errors.New("publicListen requires an HTTPS publicUrl, TLS certificate and key")
+		}
 	}
 	if base.Scheme != "https" && !(c.LoopbackDev && base.Scheme == "http") ||
 		probe.Scheme != "https" && !(c.LoopbackDev && probe.Scheme == "http" && isLoopback(probe.Hostname())) {
@@ -280,9 +297,7 @@ func start(cfg settings, adminToken string) (*server, error) {
 	return s, nil
 }
 
-func (s *server) handler() http.Handler {
-	r := http.NewServeMux()
-	r.HandleFunc("GET /healthz", s.health)
+func (s *server) clientRoutes(r *http.ServeMux) {
 	r.HandleFunc("POST /api/v1/connect", s.connect)
 	r.HandleFunc("GET /api/v1/config", s.config)
 	r.HandleFunc("POST /api/v1/ack", s.ack)
@@ -291,6 +306,18 @@ func (s *server) handler() http.Handler {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		fmt.Fprintln(w, "Скопируйте ссылку целиком и вставьте в HomeProxy.")
 	})
+}
+
+func (s *server) publicHandler() http.Handler {
+	r := http.NewServeMux()
+	s.clientRoutes(r)
+	return secureHeaders(r)
+}
+
+func (s *server) handler() http.Handler {
+	r := http.NewServeMux()
+	s.clientRoutes(r)
+	r.HandleFunc("GET /healthz", s.health)
 	r.HandleFunc("GET /api/v1/admin/state", s.admin(s.state))
 	r.HandleFunc("GET /api/v1/admin/update-history", s.admin(s.updateHistory))
 	r.HandleFunc("GET /api/v1/admin/update-policy", s.admin(s.updatePolicy))
@@ -314,6 +341,10 @@ func (s *server) handler() http.Handler {
 	} else if *s.cfg.AdminDir != "" {
 		r.Handle("GET /", http.FileServer(http.Dir(*s.cfg.AdminDir)))
 	}
+	return secureHeaders(r)
+}
+
+func secureHeaders(handler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -322,7 +353,7 @@ func (s *server) handler() http.Handler {
 		if req.TLS != nil {
 			w.Header().Set("Strict-Transport-Security", "max-age=31536000")
 		}
-		r.ServeHTTP(w, req)
+		handler.ServeHTTP(w, req)
 	})
 }
 
@@ -443,25 +474,7 @@ func run(ctx context.Context) error {
 		defer s.write.Unlock()
 		s.core.stop()
 	}()
-	api := &http.Server{Addr: cfg.Listen, Handler: s.handler(), ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10}
-	go func() {
-		<-ctx.Done()
-		shutdown, done := context.WithTimeout(context.Background(), 5*time.Second)
-		defer done()
-		api.Shutdown(shutdown)
-	}()
-	s.core.supervise(ctx, &s.write)
-	log.Printf("HomeProxy API listening on %s", cfg.Listen)
-	if cfg.CertFile != "" {
-		err = api.ListenAndServeTLS(cfg.CertFile, cfg.TLSKeyFile)
-	} else {
-		err = api.ListenAndServe()
-	}
-	if errors.Is(err, http.ErrServerClosed) {
-		return nil
-	}
-	return err
+	return s.serveAPI(ctx)
 }
 
 func main() {

@@ -165,12 +165,22 @@ try {
   await new Promise(resolve => web.once('listening', resolve))
   const agent = await context.newPage()
   await agent.setViewportSize({ width: 820, height: 760 })
-  await agent.exposeFunction('agentQA', controller)
+  let nativeTun = false
+  await agent.exposeFunction('agentQA', async (command, data) => {
+    if (command === 'windows-tun') nativeTun = data.tun
+    const result = await controller(command === 'windows-tun' ? 'status' : command, data)
+    return command === 'status' || command === 'windows-tun' ? { ...result, tun: nativeTun } : result
+  })
   await agent.addInitScript(() => {
     window.__TAURI_INTERNALS__ = { invoke: (_, { command, data }) => window.agentQA(command, data) }
   })
   await agent.goto(`http://127.0.0.1:${web.address().port}/`)
   await agent.getByRole('heading', { name: 'Маршрутизация' }).waitFor()
+  await agent.getByRole('button', { name: 'Включить системный TUN' }).click()
+  await agent.getByRole('button', { name: 'Перейти на локальный прокси' }).waitFor()
+  await agent.screenshot({ path: join(screenshots, 'agent-tun.png') })
+  await agent.getByRole('button', { name: 'Перейти на локальный прокси' }).click()
+  await agent.getByRole('button', { name: 'Включить системный TUN' }).waitFor()
   await agent.screenshot({ path: join(screenshots, 'agent-desktop.png') })
   await agent.setViewportSize({ width: 360, height: 820 })
   await agent.getByRole('button', { name: 'Сайты', exact: true }).click()

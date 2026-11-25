@@ -10,7 +10,9 @@
   type Application = { name: string; path: string; icon?: string }
   type Status = {
     platform?: 'android';
+    windows?: boolean;
     tun?: boolean;
+    strict?: boolean;
     alwaysOn?: boolean | null; lockdown?: boolean | null;
     excludedApps?: string[]; exclusionsAllowed?: boolean;
     linked: boolean; online: boolean; enabled: boolean; profile: Profile; custom: Action; revision: number | null;
@@ -254,6 +256,24 @@
           <button class="primary" disabled={busy || profile === data.profile && custom === data.custom}>Применить профиль</button>
         </form>
       </section>
+      {#if data.windows}
+        <section class="card stack" aria-label="Системный режим Windows">
+          <div class="between">
+            <div class="card-head">
+              <h2>Захват трафика Windows</h2>
+              <span class="label">{data.strict ? 'Строгий TUN' : data.tun ? 'Системный TUN' : 'Локальный HTTP-прокси'}</span>
+            </div>
+            {#if !data.strict}
+              <button disabled={busy || !data.revision} onclick={() => run('windows-tun', { tun: !data?.tun })}>
+                {data.tun ? 'Перейти на локальный прокси' : 'Включить системный TUN'}
+              </button>
+            {/if}
+          </div>
+          <p class="label">{data.tun
+            ? 'В системном режиме правила применяются без настройки прокси в каждом приложении.'
+            : 'TUN применяет правила к трафику приложений Windows. Для включения Windows запросит права администратора.'}</p>
+        </section>
+      {/if}
       {#if android}
         <section class="card stack">
           <h2>Политика VPN Android</h2>

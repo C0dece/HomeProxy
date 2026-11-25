@@ -22,6 +22,7 @@ fn run() -> Result<(), String> {
     let mut dev = false;
     let mut tun = false;
     let mut strict = false;
+    let mut handoff = false;
     let mut seconds = 10;
     let mut command = "status".to_string();
     let mut data = Value::Null;
@@ -37,6 +38,7 @@ fn run() -> Result<(), String> {
             Some("--probe-seconds") => seconds = u64::from(number(value(&mut args)?)?),
             Some("--allow-loopback-http") => dev = true,
             Some("--tun") if mode == "serve" => tun = true,
+            Some("--handoff-tun") if mode == "serve" => handoff = true,
             Some("--tun-strict") if mode == "serve" => {
                 tun = true;
                 strict = true;
@@ -63,6 +65,7 @@ fn run() -> Result<(), String> {
             probe_seconds: seconds,
             tun,
             strict,
+            handoff,
         }),
         "ctl" => {
             println!("{}", control(&directory, port, &command, &data)?);

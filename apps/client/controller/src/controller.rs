@@ -29,6 +29,7 @@ pub struct Options {
     pub probe_seconds: u64,
     pub tun: bool,
     pub strict: bool,
+    pub handoff: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -127,6 +128,9 @@ pub fn serve(options: Options) -> Result<(), String> {
     {
         return Err("Порты прокси и управления пересекаются".into());
     }
+    if options.handoff {
+        prepare_tun_handoff(&options)?;
+    }
     let mut access = String::new();
     let server = Server::http(("127.0.0.1", options.port))
         .map_err(|_| "Локальный контроллер уже работает или порт занят")?;
@@ -199,6 +203,9 @@ pub fn serve(options: Options) -> Result<(), String> {
         stopping: false,
     };
     if let Err(err) = ctl.apply(&ctl.state.clone(), false) {
+        if ctl.options.handoff {
+            return Err(err);
+        }
         ctl.last_error = Some(err);
     }
     let mut next_probe = Instant::now() + Duration::from_secs(ctl.options.probe_seconds);
@@ -255,6 +262,29 @@ pub fn serve(options: Options) -> Result<(), String> {
             ctl.sync_now();
         }
     }
+}
+
+fn prepare_tun_handoff(options: &Options) -> Result<(), String> {
+    if !options.tun || options.strict {
+        return Err("Переключение поддерживается только для обычного TUN".into());
+    }
+    let request = |command| crate::control(&options.directory, options.port, command, &Value::Null);
+    let status = request("status")?;
+    if status["tun"] != false || status["linked"] != true || status["revision"].is_null() {
+        return Err(
+            "Для запуска TUN подключите локальный Agent и дождитесь получения настроек".into(),
+        );
+    }
+    request("shutdown")?;
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], options.port));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if std::net::TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_err() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err("Контроллер не освободил локальный порт".into())
 }
 
 fn reply(request: Request, status: u16, value: Value) {
@@ -531,14 +561,16 @@ impl Controller {
         Ok(())
     }
 
-    fn status(&self) -> Value {
+    fn status(&mut self) -> Value {
         let remote = self.state.remote.as_ref();
         json!({
             "linked": self.state.enrollment.is_some(),
             "online": self.online,
             "enabled": self.state.enabled,
             "tun": self.options.tun,
+            "windows": cfg!(windows),
             "strict": self.options.strict,
+            "routingActive": self.engine.alive(),
             "revision": remote.map(|r| r.revision),
             "clientUpdatesPaused": remote.is_some_and(|r| r.client_updates_paused),
             "ack": self.state.previous_ack,

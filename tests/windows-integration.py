@@ -397,8 +397,9 @@ def test(args, root):
                 raise
             return process
 
-        def start_agent():
-            tun_flags = ["--tun-strict"] if args.strict_vm else ["--tun"] if args.tun_vm else []
+        def start_agent(tun_flags=None):
+            if tun_flags is None:
+                tun_flags = ["--tun-strict"] if args.strict_vm else ["--tun"] if args.tun_vm else []
             return remember(subprocess.Popen(
                 [args.agent, "serve", "--data", root / "agent", "--sing-box", args.sing_box, "--port", str(control),
                  "--proxy-port", str(local), "--probe-seconds", "6" if args.strict_vm else "2",
@@ -421,7 +422,7 @@ def test(args, root):
             return request(api, method, "/api/v1/admin/" + endpoint, data, admin, expected)[0]
 
         server = start_server()
-        agent = start_agent()
+        agent = start_agent([] if args.tun_handoff else None)
 
         def agent_status():
             if (exit_code := agent.poll()) is not None:
@@ -508,6 +509,15 @@ def test(args, root):
         assert ctl("sync")["clientUpdatesPaused"]
         assert change("PUT", "client-update-policy", {"paused": False}) == {"paused": False}
         assert not ctl("sync")["clientUpdatesPaused"]
+        if args.tun_handoff:
+            assert ctl("status")["tun"] is False
+            elevated = start_agent(["--tun", "--handoff-tun"])
+            assert agent.wait(timeout=12) == 0
+            agent = elevated
+            switched = eventual(lambda: (s := ctl("status"))["tun"] and s, "TUN handoff")
+            assert switched["routingActive"] and switched["linked"] and switched["revision"]
+            assert proxied(local, origin.server_port)
+            print("PASS existing Agent handed off to TUN with its account and settings", flush=True)
         print("PASS registration, scoped configuration, REALITY and authenticated CONNECT", flush=True)
         if named_host:
             status = ctl("sync")
@@ -528,6 +538,21 @@ def test(args, root):
                 eventual(lambda: through_tun(host), f"Windows transparent route for {host}")
                 assert f"{host}:{origin.server_port}" in provider.connects[before:]
             print("PASS Windows TUN IPv4, IPv6 and DNS with transparent HTTP", flush=True)
+        if args.tun_handoff:
+            previous = ctl("status")
+            ctl("shutdown")
+            assert agent.wait(timeout=10) == 0
+            agent = start_agent([])
+            switched = eventual(lambda: ctl("status"), "local Agent after TUN")
+            assert switched["tun"] is False and switched["linked"] and switched["routingActive"]
+            assert switched["revision"] == previous["revision"] and switched["profile"] == previous["profile"]
+            assert proxied(local, origin.server_port) and not through_tun(tun_hosts[0])
+            elevated = start_agent(["--tun", "--handoff-tun"])
+            assert agent.wait(timeout=12) == 0
+            agent = elevated
+            eventual(lambda: ctl("status")["tun"], "second TUN handoff")
+            eventual(lambda: through_tun(tun_hosts[0]), "transparent route after round trip")
+            print("PASS TUN to local proxy and back, preserving the session and routes", flush=True)
         apps = ctl("list-apps")
         assert any(Path(app["path"]) == Path(sys.executable) for app in apps)
         curl_path = str(Path(os.environ["SystemRoot"]) / "System32" / "curl.exe")
@@ -707,10 +732,13 @@ if __name__ == "__main__":
     parser.add_argument("--browser-qa", type=lambda p: Path(p).resolve())
     parser.add_argument("--serve", action="store_true")
     parser.add_argument("--tun-vm", action="store_true", help="Enable TUN and dynamic WFP filters in an isolated Windows VM")
+    parser.add_argument("--tun-handoff", action="store_true", help="Start without TUN, then switch modes in the isolated VM")
     parser.add_argument("--strict-vm", action="store_true", help="Check persistent WFP protection in an isolated Windows VM")
     parser.add_argument("--strict-dns", help="Guest IPv4 DNS server for the strict-mode UDP leak check")
     parser.add_argument("--strict-named-api", action="store_true", help="Check a named TLS API and proxy in the STRICT VM")
     args = parser.parse_args()
+    if args.tun_handoff and (not args.tun_vm or args.strict_vm):
+        parser.error("--tun-handoff requires --tun-vm and ordinary TUN")
     if args.strict_vm and not args.tun_vm:
         parser.error("--strict-vm requires --tun-vm")
     if args.strict_vm and not args.strict_dns:

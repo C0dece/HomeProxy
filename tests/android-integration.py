@@ -417,7 +417,7 @@ def test(args, root):
         assert proxied(), "GLOBAL package BLOCK affected another UID"
         assert ctl("ui-apps")
         row = loopback.eventual(lambda: ctl("ui-package", {"package": PROBE_APP}), "Android package row and icon")
-        assert all(value in row for value in ("HomeProxy QA HTTP", PROBE_APP, "GLOBAL", "Блокировать"))
+        assert all(value in row for value in ("HomeProxy QA HTTP", PROBE_APP, "Для всех пользователей", "Блокировать"))
 
         exclusion = {"package": PROBE_APP, "excluded": True}
         assert ctl("vpn-exclusion", exclusion)["excludedApps"] == [PROBE_APP]
@@ -446,7 +446,7 @@ def test(args, root):
         assert network(PROBE_APP), "LOCAL package rule did not route directly"
         assert provider_target not in provider.connects[before:]
         row = ctl("ui-package", package)
-        assert "LOCAL" in row and "Напрямую с устройства" in row
+        assert "На этом устройстве" in row and "Напрямую с устройства" in row
         assert ctl("ui-app-search", {"query": PROBE_APP})
         (Path("dist/qa") / "android-apps.png").write_bytes(adb("exec-out", "screencap", "-p"))
 

@@ -34,6 +34,9 @@ func (s *server) serveAPI(ctx context.Context) error {
 			api.TLSConfig = &tls.Config{Certificates: []tls.Certificate{certificate}}
 		}
 	}
+	if s.cfg.LocalAdmin != "" {
+		servers = append(servers, apiServer(s.cfg.LocalAdmin, s.localAdminHandler()))
+	}
 
 	// Bind every address before any handler starts serving.
 	listeners := make([]net.Listener, 0, len(servers))

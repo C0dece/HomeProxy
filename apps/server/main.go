@@ -50,6 +50,7 @@ type settings struct {
 
 	Listen         string  `json:"listen"`
 	PublicListen   string  `json:"publicListen"`
+	LocalAdmin     string  `json:"localAdminListen"`
 	PublicURL      string  `json:"publicUrl"`
 	Database       string  `json:"database"`
 	KeyFile        string  `json:"keyFile"`
@@ -158,6 +159,14 @@ func (c settings) validate() error {
 		}
 		if base.Scheme != "https" || c.CertFile == "" || c.TLSKeyFile == "" {
 			return errors.New("publicListen requires an HTTPS publicUrl, TLS certificate and key")
+		}
+	}
+	if c.LocalAdmin != "" {
+		host, port, err := net.SplitHostPort(c.LocalAdmin)
+		n, _ := strconv.Atoi(port)
+		if c.PublicListen == "" || err != nil || !validPort(n) || n == apiPort ||
+			(host != "127.0.0.1" && host != "::1") || port != strconv.Itoa(n) {
+			return errors.New("localAdminListen requires publicListen and a separate loopback port")
 		}
 	}
 	if dns := c.DestinationDNS; dns != nil {
@@ -330,6 +339,28 @@ func (s *server) publicHandler() http.Handler {
 func (s *server) handler() http.Handler {
 	r := http.NewServeMux()
 	s.clientRoutes(r)
+	s.adminRoutes(r)
+	return secureHeaders(r)
+}
+
+func (s *server) localAdminHandler() http.Handler {
+	r := http.NewServeMux()
+	s.adminRoutes(r)
+	origin := "http://" + s.cfg.LocalAdmin
+	return secureHeaders(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Host != s.cfg.LocalAdmin {
+			http.Error(w, "Invalid host", http.StatusMisdirectedRequest)
+			return
+		}
+		if requestOrigin := req.Header.Get("Origin"); requestOrigin != "" && requestOrigin != origin {
+			http.Error(w, "Invalid origin", http.StatusForbidden)
+			return
+		}
+		r.ServeHTTP(w, req)
+	}))
+}
+
+func (s *server) adminRoutes(r *http.ServeMux) {
 	r.HandleFunc("GET /healthz", s.health)
 	r.HandleFunc("GET /api/v1/admin/state", s.admin(s.state))
 	r.HandleFunc("GET /api/v1/admin/update-history", s.admin(s.updateHistory))
@@ -355,7 +386,6 @@ func (s *server) handler() http.Handler {
 	} else if *s.cfg.AdminDir != "" {
 		r.Handle("GET /", http.FileServer(http.Dir(*s.cfg.AdminDir)))
 	}
-	return secureHeaders(r)
 }
 
 func secureHeaders(handler http.Handler) http.Handler {

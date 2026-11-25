@@ -184,18 +184,23 @@ def request(port, method, path, data=None, token=None, expected=200, headers=Non
 
 
 def check_split_api(args, root, settings, cert, key, admin, env, flags):
-    private, public, tunnel = (new_port() for _ in range(3))
+    private, public, local_admin, tunnel = (new_port() for _ in range(4))
     config = root / "split.json"
-    config.write_text(json.dumps({
+    split = {
         **settings, "listen": address(private), "publicListen": address(public),
+        "localAdminListen": address(local_admin),
         "publicUrl": "https://" + address(public), "certFile": str(cert), "tlsKeyFile": str(key),
         "loopbackDev": False, "probeUrl": "https://probe.example/ready",
         "destinationDns": {"address": "1.1.1.1", "serverName": "cloudflare-dns.com"},
         "database": "split.sqlite", "keyFile": "split-vault.key", "realityKeyFile": "split-reality.key",
         "tunnelListen": address(tunnel), "tunnelPort": tunnel,
-    }), encoding="utf-8")
+    }
     ca = ssl.create_default_context(cafile=str(cert))
     command = [args.server, "-config", config]
+    config.write_text(json.dumps({**split, "localAdminListen": f"0.0.0.0:{local_admin}"}), encoding="utf-8")
+    result = subprocess.run(command, env=env, capture_output=True, creationflags=flags, timeout=15)
+    assert result.returncode != 0 and b"localAdminListen requires" in result.stderr, result.stderr
+    config.write_text(json.dumps(split), encoding="utf-8")
     with socket.socket() as occupied:
         occupied.bind(("127.0.0.1", public))
         occupied.listen()
@@ -208,8 +213,17 @@ def check_split_api(args, root, settings, cert, key, admin, env, flags):
             assert health["ready"] and health["pid"] == process.pid
             assert b"<html" in request(private, "GET", "/", tls=ca, raw=True)[0].lower()
             assert request(private, "GET", "/api/v1/admin/state", token=admin, tls=ca)[0]["users"] == []
-            user = request(private, "POST", "/api/v1/admin/users", {"name": "HTTPS QA"},
-                           admin, 201, tls=ca)[0]["id"]
+            assert b"<html" in request(local_admin, "GET", "/", raw=True)[0].lower()
+            request(local_admin, "GET", "/api/v1/admin/state", expected=401)
+            request(local_admin, "GET", "/api/v1/admin/state", token=admin,
+                    headers={"Origin": "http://" + address(local_admin)})
+            request(local_admin, "GET", "/api/v1/admin/state", token=admin, expected=421,
+                    headers={"Host": "example.test"}, raw=True)
+            request(local_admin, "GET", "/api/v1/admin/state", token=admin, expected=403,
+                    headers={"Origin": "https://example.test"}, raw=True)
+            request(local_admin, "POST", "/api/v1/connect", expected=405, raw=True)
+            user = request(local_admin, "POST", "/api/v1/admin/users", {"name": "HTTPS QA"},
+                           admin, 201, headers={"Origin": "http://" + address(local_admin)})[0]["id"]
             invite = request(private, "POST", "/api/v1/admin/invites",
                              {"userId": user, "label": "HTTPS QA", "transport": "agent"},
                              admin, 201, tls=ca)[0]["link"]
@@ -237,7 +251,7 @@ def check_split_api(args, root, settings, cert, key, admin, env, flags):
             if process.poll() is None:
                 process.kill()
                 process.wait(timeout=6)
-    print("PASS split TLS client API, private Admin and health, and occupied listener recovery", flush=True)
+    print("PASS split TLS, local Admin origin checks, private routes and occupied listener recovery", flush=True)
 
 
 def proxied(proxy, target):

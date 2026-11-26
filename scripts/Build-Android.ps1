@@ -150,7 +150,7 @@ dependencies {
         [void]$queries.AppendChild($launcherQuery)
     }
     $names = @($manifest.manifest.'uses-permission' | ForEach-Object { $_.GetAttribute('name', $ns) })
-    foreach ($permission in @('ACCESS_NETWORK_STATE', 'FOREGROUND_SERVICE', 'FOREGROUND_SERVICE_SPECIAL_USE', 'POST_NOTIFICATIONS', 'REQUEST_INSTALL_PACKAGES')) {
+    foreach ($permission in @('ACCESS_NETWORK_STATE', 'FOREGROUND_SERVICE', 'FOREGROUND_SERVICE_SPECIAL_USE', 'POST_NOTIFICATIONS', 'REQUEST_INSTALL_PACKAGES', 'RECEIVE_BOOT_COMPLETED')) {
         $name = "android.permission.$permission"
         if ($name -notin $names) {
             $item = $manifest.CreateElement('uses-permission')
@@ -193,6 +193,31 @@ dependencies {
         [void]$receiver.SetAttribute('name', $ns, '.AndroidUpdateResult')
         [void]$receiver.SetAttribute('exported', $ns, 'false')
         [void]$app.AppendChild($receiver)
+    }
+    if (!($app.service | Where-Object { $_ -and $_.GetAttribute('name', $ns) -eq '.HomeProxyTileService' })) {
+        $tile = $manifest.CreateElement('service')
+        [void]$tile.SetAttribute('name', $ns, '.HomeProxyTileService')
+        [void]$tile.SetAttribute('exported', $ns, 'true')
+        [void]$tile.SetAttribute('label', $ns, 'HomeProxy')
+        [void]$tile.SetAttribute('icon', $ns, '@mipmap/ic_launcher')
+        [void]$tile.SetAttribute('permission', $ns, 'android.permission.BIND_QUICK_SETTINGS_TILE')
+        $tileFilter = $manifest.CreateElement('intent-filter')
+        $tileAction = $manifest.CreateElement('action')
+        [void]$tileAction.SetAttribute('name', $ns, 'android.service.quicksettings.action.QS_TILE')
+        [void]$tileFilter.AppendChild($tileAction)
+        [void]$tile.AppendChild($tileFilter)
+        [void]$app.AppendChild($tile)
+    }
+    if (!($app.receiver | Where-Object { $_ -and $_.GetAttribute('name', $ns) -eq '.BootReceiver' })) {
+        $boot = $manifest.CreateElement('receiver')
+        [void]$boot.SetAttribute('name', $ns, '.BootReceiver')
+        [void]$boot.SetAttribute('exported', $ns, 'true')
+        $bootFilter = $manifest.CreateElement('intent-filter')
+        $bootAction = $manifest.CreateElement('action')
+        [void]$bootAction.SetAttribute('name', $ns, 'android.intent.action.BOOT_COMPLETED')
+        [void]$bootFilter.AppendChild($bootAction)
+        [void]$boot.AppendChild($bootFilter)
+        [void]$app.AppendChild($boot)
     }
     $manifest.Save($file)
     $buildArguments = @('android', 'build', '--apk', '--target', $Target, '--split-per-abi', '--ci')

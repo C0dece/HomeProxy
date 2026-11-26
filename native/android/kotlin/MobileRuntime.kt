@@ -79,6 +79,24 @@ internal object MobileRuntime {
 
     fun port(): Int = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")).use { it.localPort }
 
+    fun hasRemote(context: Context): Boolean = try {
+        state(context).has("remote")
+    } catch (_: Exception) { false }
+
+    fun isVpnRunning(): Boolean = engine?.connected == true
+
+    fun isAlwaysOnVpn(): Boolean = engine?.isAlwaysOn == true
+
+    fun currentProfile(context: Context): String = try {
+        state(context).optString("profile", "AUTO")
+    } catch (_: Exception) { "AUTO" }
+
+    fun currentModeLabel(context: Context): String = when (currentProfile(context)) {
+        "DIRECT_INTERNET" -> "Авто (правила)"
+        "AUTO" -> "Весь трафик"
+        else -> "Свой профиль"
+    }
+
     fun status(context: Context): JSONObject {
         val current = state(context)
         val remote = current.optJSONObject("remote")
@@ -87,6 +105,7 @@ internal object MobileRuntime {
             .put("linked", current.has("key"))
             .put("online", online)
             .put("enabled", engine?.connected == true)
+            .put("autoStart", current.optBoolean("autoStart", false))
             .put("alwaysOn", engine?.isAlwaysOn ?: JSONObject.NULL)
             .put("lockdown", engine?.isLockdownEnabled ?: JSONObject.NULL)
             .put("excludedApps", exclusions(current))
@@ -99,6 +118,7 @@ internal object MobileRuntime {
             .put("error", message ?: JSONObject.NULL)
             .put("rules", current.optJSONArray("local") ?: JSONArray())
             .put("remoteRules", remote?.optJSONArray("rules") ?: JSONArray())
+            .put("remoteGroups", remote?.optJSONArray("groups") ?: JSONArray())
             .put("pending", JSONArray())
             .put("route", engine?.routeStatus() ?: JSONObject()
                 .put("selected", JSONObject.NULL).put("fallback", false)
@@ -156,7 +176,9 @@ internal object MobileRuntime {
                 } ?: throw MobileFailure("Недопустимое значение правила")
                 val action = args.getString("action")
                 if (action !in actions) throw MobileFailure("Недопустимый маршрут")
-                val rule = JSONObject().put("kind", kind).put("pattern", destination).put("action", action)
+                val enabled = args.optBoolean("enabled", true)
+                val rule = JSONObject().put("kind", kind).put("pattern", destination)
+                    .put("action", action).put("enabled", enabled)
                 if (command == "personal-rule") {
                     rule.put("revision", args.optLong("revision"))
                     val result = request(current, "/personal-rules", "PUT", rule)
@@ -171,6 +193,72 @@ internal object MobileRuntime {
                         if (entry.optString("pattern") != destination || entry.optString("kind") != kind) next.put(entry)
                     }
                     if (action != "INHERIT") next.put(rule)
+                    apply(context, JSONObject(current.toString()).put("local", next))
+                }
+            }
+            "delete-personal-rule" -> {
+                requireLinked(context)
+                val id = args.getString("id").trim()
+                if (id.isEmpty()) throw MobileFailure("Укажите идентификатор правила")
+                val result = request(current, "/personal-rules/$id", "DELETE")
+                if (result.code !in 200..299 && result.code != 404) throw MobileFailure("Сервер отклонил удаление правила")
+                sync(context)
+            }
+            "quick-mode" -> applyQuickMode(context, args.getString("mode"))
+            "android-autostart" -> {
+                val enabled = args.getBoolean("autoStart")
+                persist(context, JSONObject(current.toString()).put("autoStart", enabled))
+            }
+            "recent-domains" -> {
+                engine?.pollConnections()
+                return JSONObject().put("domains", engine?.recentDomainsJson() ?: JSONArray())
+            }
+            "clear-recent-domains" -> {
+                engine?.clearRecentDomains()
+                return JSONObject().put("domains", JSONArray())
+            }
+            "bulk-domain-rules" -> {
+                requireLinked(context)
+                val domains = args.getJSONArray("domains")
+                val scope = args.optString("scope", "LOCAL")
+                val kind = args.optString("kind", "domain")
+                val action = args.optString("action", "PROXY")
+                if (kind !in setOf("domain", "suffix") || action !in actions || domains.length() == 0)
+                    throw MobileFailure("Выберите домены и корректный маршрут")
+                val cleaned = (0 until domains.length()).map { domains.getString(it).trim().lowercase().trimEnd('.') }
+                    .filter { it.isNotEmpty() && it.length <= 253 }.distinct()
+                if (cleaned.isEmpty()) throw MobileFailure("Нет корректных доменов")
+                if (scope == "PERSONAL") {
+                    val remoteRules = current.optJSONObject("remote")?.optJSONArray("rules") ?: JSONArray()
+                    for (dom in cleaned) {
+                        var rev = 0L
+                        for (i in 0 until remoteRules.length()) {
+                            val r = remoteRules.getJSONObject(i)
+                            if (r.optString("userId").isNotEmpty() && r.optString("kind") == kind && r.optString("pattern") == dom) {
+                                rev = r.optLong("revision")
+                                break
+                            }
+                        }
+                        val rule = JSONObject().put("kind", kind).put("pattern", dom)
+                            .put("action", action).put("enabled", true).put("revision", rev)
+                        val result = request(current, "/personal-rules", "PUT", rule)
+                        if (result.code == 409) throw MobileFailure("Конфликт правила для $dom. Синхронизируйте настройки")
+                        if (result.code !in 200..299) throw MobileFailure("Сервер отклонил правило для $dom")
+                    }
+                    sync(context)
+                } else {
+                    val old = current.optJSONArray("local") ?: JSONArray()
+                    val next = JSONArray()
+                    val replacing = cleaned.toSet()
+                    for (i in 0 until old.length()) {
+                        val entry = old.getJSONObject(i)
+                        if (entry.optString("kind") != kind || entry.optString("pattern") !in replacing) next.put(entry)
+                    }
+                    if (action != "INHERIT") {
+                        for (dom in cleaned) {
+                            next.put(JSONObject().put("kind", kind).put("pattern", dom).put("action", action).put("enabled", true))
+                        }
+                    }
                     apply(context, JSONObject(current.toString()).put("local", next))
                 }
             }
@@ -206,7 +294,7 @@ internal object MobileRuntime {
         try {
             val (code, body, nextTag) = request(current, "/config?platform=android", "GET", etag = tag,
                 version = AndroidUpdates.installedVersion(context))
-            online = true
+            online = code == 200 || code == 304
             if (code == 401) {
                 dropConnection(context)
                 persist(context, localSettings(current))
@@ -317,6 +405,7 @@ internal object MobileRuntime {
         if (engine !== service) return
         if (service.connected) {
             try { service.probe() } catch (_: Exception) { message = "Проверка маршрута VPN не удалась" }
+            try { service.pollConnections() } catch (_: Exception) { }
         } else if (service.isAlwaysOn) {
             establish(service)
         } else {
@@ -355,6 +444,44 @@ internal object MobileRuntime {
             }.build()
         probe.newCall(Request.Builder().url(url).head().build()).execute().use { it.isSuccessful }
     } catch (_: Exception) { false }
+
+    fun applyQuickMode(context: Context, mode: String) {
+        val current = state(context)
+        when (mode) {
+            "off" -> {
+                requireManualVpn()
+                stop(context)
+            }
+            "rules" -> {
+                requireLinked(context)
+                apply(context, JSONObject(current.toString()).put("profile", "DIRECT_INTERNET"))
+            }
+            "all" -> {
+                requireLinked(context)
+                apply(context, JSONObject(current.toString()).put("profile", "AUTO"))
+            }
+            else -> throw MobileFailure("Неверный быстрый режим")
+        }
+        engine?.showNotification()
+        HomeProxyTileService.requestUpdate(context)
+    }
+
+    fun applyQuickModeSafe(context: Context, mode: String) {
+        try {
+            applyQuickMode(context, mode)
+        } catch (_: Exception) {
+        }
+    }
+
+    fun fetchConnections(port: Int, secret: String): JSONArray = try {
+        http.newCall(
+            Request.Builder().url("http://127.0.0.1:$port/connections")
+                .header("Authorization", "Bearer $secret").build()
+        ).execute().use { response ->
+            if (!response.isSuccessful) JSONArray()
+            else JSONObject(response.body?.string() ?: "{}").optJSONArray("connections") ?: JSONArray()
+        }
+    } catch (_: Exception) { JSONArray() }
 
     fun select(port: Int, name: String, secret: String) {
         http.newCall(Request.Builder().url("http://127.0.0.1:$port/proxies/selected-proxy")

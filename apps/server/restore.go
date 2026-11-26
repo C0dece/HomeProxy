@@ -152,6 +152,9 @@ func updateRestored(db *sql.DB, version int64, revoked []obj) error {
 	if _, err := tx.Exec("UPDATE rules SET revision=?", version); err != nil {
 		return err
 	}
+	if _, err := tx.Exec("UPDATE service_groups SET revision=?", version); err != nil {
+		return err
+	}
 	if _, err := tx.Exec("INSERT INTO audit VALUES(?,?,?)", version, "backup.restored", time.Now().Unix()); err != nil {
 		return err
 	}

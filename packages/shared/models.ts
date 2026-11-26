@@ -1,13 +1,30 @@
 export type Action = 'PROXY' | 'AUTO' | 'LOCAL_DIRECT' | 'SERVER_DIRECT' | 'BLOCK' | 'INHERIT'
 export type Profile = 'AUTO' | 'HOME_SERVER' | 'DIRECT_HTTP' | 'DIRECT_INTERNET' | 'CUSTOM'
+export type RuleKind = 'domain' | 'suffix' | 'ip_cidr' | 'process' | 'package'
 export type Rule = {
   id?: string
   userId?: string
   pattern: string
-  kind: 'domain' | 'suffix' | 'process' | 'package'
+  kind: RuleKind
   action: Action
+  enabled?: boolean
   locked?: boolean
   revision?: number
+}
+export type ServiceGroupEntry = {
+  id?: string
+  kind: RuleKind
+  pattern: string
+}
+export type ServiceGroup = {
+  id?: string
+  name: string
+  userId?: string
+  action: Action
+  enabled: boolean
+  locked?: boolean
+  revision?: number
+  entries: ServiceGroupEntry[]
 }
 
 export const actionNames: Record<Action, string> = {

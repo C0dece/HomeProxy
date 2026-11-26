@@ -1,8 +1,8 @@
 <script lang="ts">
-  import { Activity, ArrowRight, Cable, DatabaseBackup, Globe2, LayoutDashboard, Link2, ListFilter, LogOut, Monitor, PackageCheck, Plus, RefreshCw, Router, Shield, Users, X } from 'lucide-svelte'
+  import { Activity, ArrowRight, Cable, DatabaseBackup, Globe2, Layers, LayoutDashboard, Link2, ListFilter, LogOut, Monitor, PackageCheck, Plus, RefreshCw, Router, Shield, Users, X } from 'lucide-svelte'
   import Brand from '../../../packages/ui/Brand.svelte'
   import { actionNames, scopeOf } from '../../../packages/shared/models'
-  import type { Action, Rule } from '../../../packages/shared/models'
+  import type { Action, Rule, RuleKind, ServiceGroup, ServiceGroupEntry } from '../../../packages/shared/models'
   import { admin } from './api'
   import type { Proxy, State, UpdateEntry, UpdatePolicy, User } from './api'
 
@@ -12,17 +12,23 @@
     { id: 'users', label: 'Пользователи', icon: Users },
     { id: 'devices', label: 'Устройства', icon: Monitor },
     { id: 'rules', label: 'Правила', icon: ListFilter },
+    { id: 'groups', label: 'Группы сервисов', icon: Layers },
     { id: 'updates', label: 'Обновления', icon: PackageCheck },
     { id: 'audit', label: 'Журнал и копии', icon: DatabaseBackup }
   ] as const
   const eventNames: Record<string, string> = {
-    'user.created': 'Создан пользователь', 'user.updated': 'Изменено имя пользователя',
+    'user.created': 'Создан пользователь', 'user.updated': 'Изменено имя пользователя', 'user.deleted': 'Удалён пользователь',
     'proxy.saved': 'Сохранён прокси', 'proxy.deleted': 'Удалён прокси',
     'device.invited': 'Создана ссылка', 'device.connected': 'Устройство подключено', 'device.revoked': 'Доступ отозван',
-    'rule.saved': 'Сохранено правило', 'rule.deleted': 'Удалено правило', 'routes.saved': 'Назначены прокси',
+    'rule.saved': 'Сохранено правило', 'rule.deleted': 'Удалено правило',
+    'group.saved': 'Сохранена группа сервисов', 'group.deleted': 'Удалена группа сервисов',
+    'routes.saved': 'Назначены прокси',
     'client-update-policy.saved': 'Изменена политика обновлений клиентов'
   }
   const deviceStates: Record<string, string> = { connected: 'Подключено', invited: 'Ожидает', revoked: 'Отозвано' }
+  const entryKindNames: Record<RuleKind, string> = {
+    domain: 'Домен', suffix: 'Поддомены', ip_cidr: 'IP / CIDR', process: 'Приложение Windows', package: 'Приложение Android'
+  }
   const releasePlatforms = { windows: 'Windows', android: 'Android', browser: 'Расширение' }
   const updateOutcomes: Record<UpdateEntry['outcome'], string> = {
     installed: 'Установлено', 'no-update': 'Нет совместимого обновления', completed: 'Проверка завершена', failed: 'Ошибка', paused: 'Пропущено по политике'
@@ -30,8 +36,11 @@
   const updatePhases: Record<UpdateEntry['phase'], string> = {
     prerequisites: 'Подготовка', recovery: 'Восстановление', apply: 'Проверка и установка', policy: 'Чтение политики'
   }
-  type Dialog = 'invite' | 'proxy' | 'user' | 'routes' | 'rule'
-  const dialogNames: Record<Dialog, string> = { invite: 'Ссылка подключения', proxy: 'Прокси', user: 'Пользователь', routes: 'Очередь прокси', rule: 'Правило' }
+  type Dialog = 'invite' | 'proxy' | 'user' | 'routes' | 'rule' | 'group'
+  const dialogNames: Record<Dialog, string> = {
+    invite: 'Ссылка подключения', proxy: 'Прокси', user: 'Пользователь',
+    routes: 'Очередь прокси', rule: 'Правило', group: 'Группа сервисов'
+  }
 
   let view = $state<typeof views[number]['id']>('overview')
   let data = $state<State>()
@@ -49,8 +58,17 @@
   let transport = $state('agent')
   let link = $state('')
   let editingProxy = $state<Proxy>()
+  let proxyHeadersText = $state('')
   let editingUser = $state<User>()
   let editingRule = $state<Rule>()
+  let editingGroup = $state<ServiceGroup>()
+  let groupName = $state('')
+  let groupAction = $state<Action>('PROXY')
+  let groupEnabled = $state(true)
+  let groupLocked = $state(false)
+  let groupEntries = $state<ServiceGroupEntry[]>([])
+  let newEntryKind = $state<RuleKind>('domain')
+  let newEntryPattern = $state('')
   let ruleKind = $state<Rule['kind']>('domain')
   let selected = $state<string[]>([])
   let candidate = $state('')
@@ -61,6 +79,7 @@
   let clientUpdatePolicy = $state<Promise<{ paused: boolean } | null>>()
   let title = $derived(views.find(item => item.id === view)?.label)
   let active = $derived(data?.devices.filter(d => d.status === 'connected').length ?? 0)
+  let onlineCount = $derived(data?.devices.filter(d => d.online).length ?? 0)
 
   function matches(...fields: string[]) {
     return fields.join(' ').toLowerCase().includes(search.trim().toLowerCase())
@@ -116,15 +135,81 @@
     if (next === 'updates') loadUpdates()
     else { updateHistory = undefined; updatePolicy = undefined; clientUpdatePolicy = undefined }
   }
-  function open(type: Dialog, item?: Proxy | Rule | User) {
+  function formatHeaders(headers?: Record<string, string>) {
+    if (!headers) return ''
+    return Object.entries(headers).map(([k, v]) => `${k}: ${v}`).join('\n')
+  }
+  function parseHeaders(text: string): Record<string, string> {
+    const out: Record<string, string> = {}
+    for (const rawLine of text.split(/\r?\n/)) {
+      const line = rawLine.trim()
+      if (!line) continue
+      const idx = line.indexOf(':')
+      if (idx <= 0) throw new Error('Некорректный формат заголовка (ожидается Имя: Значение)')
+      const key = line.slice(0, idx).trim()
+      const val = line.slice(idx + 1).trim()
+      out[key] = val
+    }
+    return out
+  }
+  function open(type: Dialog, item?: Proxy | Rule | User | ServiceGroup) {
     error = ''; message = ''; dialog = type; link = ''; label = ''; transport = 'agent'; candidate = ''
     editingProxy = type === 'proxy' ? item as Proxy | undefined : undefined
+    proxyHeadersText = type === 'proxy' ? formatHeaders((item as Proxy | undefined)?.headers) : ''
     editingUser = type === 'user' ? item as User | undefined : undefined
     editingRule = type === 'rule' ? item as Rule | undefined : undefined
+    editingGroup = type === 'group' ? item as ServiceGroup | undefined : undefined
+    groupName = editingGroup?.name ?? ''
+    groupAction = editingGroup?.action ?? 'PROXY'
+    groupEnabled = editingGroup?.enabled ?? true
+    groupLocked = Boolean(editingGroup?.locked)
+    groupEntries = editingGroup?.entries ? editingGroup.entries.map(e => ({ ...e })) : []
+    newEntryKind = 'domain'
+    newEntryPattern = ''
     ruleKind = editingRule?.kind ?? 'domain'
-    userId = editingRule?.userId ?? (type === 'rule' ? '' : data?.users[0]?.id ?? '')
+    userId = type === 'rule'
+      ? (editingRule?.userId ?? '')
+      : type === 'group'
+        ? (editingGroup?.userId ?? '')
+        : (data?.users[0]?.id ?? '')
     selectUser(userId)
     modal?.showModal()
+  }
+  function addGroupEntry() {
+    const pattern = newEntryPattern.trim()
+    if (!pattern) return
+    if (groupEntries.some(e => e.kind === newEntryKind && e.pattern.toLowerCase() === pattern.toLowerCase())) {
+      error = 'Такая запись уже есть в группе'
+      return
+    }
+    error = ''
+    groupEntries = [...groupEntries, { kind: newEntryKind, pattern }]
+    newEntryPattern = ''
+  }
+  function toggleRule(rule: Rule) {
+    void task(async () => {
+      await admin(token, 'rules', 'PUT', {
+        userId: rule.userId ?? '',
+        pattern: rule.pattern,
+        kind: rule.kind,
+        action: rule.action,
+        enabled: !(rule.enabled ?? true),
+        locked: Boolean(rule.locked),
+        revision: rule.revision ?? 0
+      })
+      await load()
+      message = 'Изменения сохранены'
+    })
+  }
+  function toggleGroup(group: ServiceGroup) {
+    void task(async () => {
+      await admin(token, 'groups', 'PUT', {
+        ...group,
+        enabled: !group.enabled
+      })
+      await load()
+      message = 'Изменения сохранены'
+    })
   }
   function selectUser(id: string) {
     userId = id
@@ -150,7 +235,8 @@
       } else {
         if (dialog === 'proxy') await admin(token, 'proxies', 'PUT', {
           id: editingProxy?.id ?? '', name: field('name'), host: field('host'), port: Number(field('port')),
-          tls: fields.has('tls'), username: field('username'), password: field('password')
+          tls: fields.has('tls'), username: field('username'), password: field('password'),
+          headers: parseHeaders(proxyHeadersText)
         })
         if (dialog === 'user') {
           await admin(token, editingUser ? 'users/' + editingUser.id : 'users',
@@ -159,7 +245,12 @@
         if (dialog === 'routes') await admin(token, 'routes', 'PUT', { userId, proxyIds: selected })
         if (dialog === 'rule') await admin(token, 'rules', 'PUT', {
           userId, pattern: field('pattern'), kind: field('kind'), action: field('action') as Action,
-          locked: fields.has('locked'), revision: editingRule?.revision ?? 0
+          enabled: fields.has('enabled'), locked: fields.has('locked'), revision: editingRule?.revision ?? 0
+        })
+        if (dialog === 'group') await admin(token, 'groups', 'PUT', {
+          id: editingGroup?.id ?? '', name: groupName, userId, action: groupAction,
+          enabled: groupEnabled, locked: groupLocked, revision: editingGroup?.revision ?? 0,
+          entries: groupEntries
         })
         modal?.close()
       }
@@ -232,6 +323,8 @@
             <button class="primary" onclick={() => open('user')}><Plus size={17} /> Добавить пользователя</button>
           {:else if view === 'rules'}
             <button class="primary" onclick={() => open('rule')}><Plus size={17} /> Добавить правило</button>
+          {:else if view === 'groups'}
+            <button class="primary" onclick={() => open('group')}><Plus size={17} /> Добавить группу</button>
           {:else if view === 'audit'}
             <button class="primary" disabled={busy} onclick={backup}><DatabaseBackup size={17} /> Создать копию SQLite</button>
           {/if}
@@ -240,22 +333,22 @@
         {#if message && !modal?.open}<p class="notice success" role="status">{message}</p>{/if}
         {#if view === 'overview'}
           <div class="metrics">
-            {#each [{ icon: Monitor, label: 'Подключённые устройства', value: active }, { icon: Router, label: 'Настроенные прокси', value: data.proxies.length }, { icon: ListFilter, label: 'Правила', value: data.rules.length }, { icon: Activity, label: 'Версия конфигурации', value: data.revision }] as card}
+            {#each [{ icon: Monitor, label: 'Устройства онлайн', value: `${onlineCount} / ${active}` }, { icon: Router, label: 'Настроенные прокси', value: data.proxies.length }, { icon: ListFilter, label: 'Правила и группы', value: data.rules.length + data.groups.length }, { icon: Activity, label: 'Версия конфигурации', value: data.revision }] as card}
               <div class="card metric"><span class="mark"><card.icon size={19} /></span><strong>{card.value}</strong><small>{card.label}</small></div>
             {/each}
           </div>
           <section class="card stack">
             <div class="between">
-              <div class="card-head"><h2>Схема маршрутизации</h2><p class="muted">Профиль AUTO использует доступные прокси в заданном порядке.</p></div>
+              <div class="card-head"><h2>Схема маршрутизации</h2><p class="muted">В профиле AUTO клиенты подключаются к внешнему прокси напрямую с устройства.</p></div>
             </div>
             <div class="topology">
               <div class="node"><Monitor size={22} /><div><strong>Устройство</strong><small>HomeProxy Agent</small></div></div>
               <ArrowRight class="edge" size={18} />
-              <div class="node"><Globe2 size={22} /><div><strong>HomeProxy Server</strong><small>VLESS + REALITY</small></div></div>
+              <div class="node"><Cable size={22} /><div><strong>Внешний прокси</strong><small>HTTP CONNECT (основной)</small></div></div>
               <ArrowRight class="edge" size={18} />
-              <div class="node"><Cable size={22} /><div><strong>Внешний прокси</strong><small>HTTP CONNECT</small></div></div>
+              <div class="node"><Globe2 size={22} /><div><strong>HomeProxy Server</strong><small>VLESS + REALITY (резерв)</small></div></div>
             </div>
-            <span class="label">Если сервер недоступен, Agent подключается к резервному прокси с устройства.</span>
+            <span class="label">Если внешний прокси с устройства недоступен или выбран маршрут через сервер, трафик идёт через HomeProxy Server.</span>
           </section>
         {/if}
 
@@ -270,7 +363,13 @@
               <thead><tr><th>Устройство</th><th>Пользователь</th><th>Статус</th><th>Версия</th><th>Последняя связь</th>{#if view === 'devices'}<th>Действия</th>{/if}</tr></thead>
               <tbody>{#each data.devices.filter(d => matches(d.label, username(d.userId))).slice(0, view === 'overview' ? 5 : undefined) as device (device.id)}
                 <tr><td data-label="Устройство"><span class="flex"><Monitor size={16} />{device.label}</span></td><td data-label="Пользователь">{username(device.userId)}</td>
-                  <td data-label="Статус"><span class="badge" class:ok={device.status === 'connected'} class:wait={device.status === 'invited'} class:bad={device.status === 'revoked'}>{deviceStates[device.status]}</span></td>
+                  <td data-label="Статус">
+                    {#if device.status === 'connected'}
+                      <span class="badge" class:ok={Boolean(device.online)}>{device.online ? 'Онлайн' : 'Офлайн'}{#if (device.activeConnections ?? 0) > 0} · {device.activeConnections}{/if}</span>
+                    {:else}
+                      <span class="badge" class:wait={device.status === 'invited'} class:bad={device.status === 'revoked'}>{deviceStates[device.status]}</span>
+                    {/if}
+                  </td>
                   <td data-label="Версия" class="mono">{device.ackRevision || 'Нет данных'}</td><td data-label="Последняя связь">{stamp(device.seen)}</td>
                   {#if view === 'devices'}<td>{#if device.status !== 'revoked'}<button class="small danger" onclick={() => remove('devices/' + device.id, 'Отозвать доступ устройства?')}>Отозвать</button>{/if}</td>{/if}</tr>
               {/each}</tbody>
@@ -283,7 +382,8 @@
             {:else}<div class="table-scroll"><table>
               <thead><tr><th>Имя</th><th>Адрес</th><th>Протокол</th><th>Действия</th></tr></thead>
               <tbody>{#each data.proxies.filter(p => matches(p.name, p.host)) as proxy (proxy.id)}
-                <tr><td data-label="Имя">{proxy.name}</td><td data-label="Адрес" class="mono">{proxy.host}:{proxy.port}</td><td data-label="Протокол">{proxy.tls ? 'HTTPS CONNECT' : 'HTTP CONNECT'}</td>
+                <tr><td data-label="Имя">{proxy.name}</td><td data-label="Адрес" class="mono">{proxy.host}:{proxy.port}</td>
+                  <td data-label="Протокол"><span class="flex">{proxy.tls ? 'HTTPS CONNECT' : 'HTTP CONNECT'}{#if proxy.headers && Object.keys(proxy.headers).length}<span class="badge">+{Object.keys(proxy.headers).length} заг.</span>{/if}</span></td>
                   <td><div class="flex"><button class="small" disabled={busy} onclick={() => probe(proxy)}>Проверить</button><button class="small" onclick={() => open('proxy', proxy)}>Изменить</button>
                     <button class="small danger" onclick={() => remove('proxies/' + proxy.id, 'Удалить прокси из всех назначений?')}>Удалить</button></div></td></tr>
               {/each}</tbody>
@@ -300,7 +400,8 @@
                 <tr><td data-label="Имя">{user.name}</td><td data-label="Очередь прокси">{data.routes.filter(route => route.userId === user.id).map(route => data?.proxies.find(p => p.id === route.proxyId)?.name).join(', ') || 'Нет назначений'}</td>
                   <td><div class="flex"><button class="small" onclick={() => open('user', user)}>Изменить имя</button>
                     <button class="small" onclick={() => { open('routes'); selectUser(user.id) }}>Назначить прокси</button>
-                    <button class="small" onclick={() => { open('invite'); selectUser(user.id) }}>Создать ссылку</button></div></td></tr>
+                    <button class="small" onclick={() => { open('invite'); selectUser(user.id) }}>Создать ссылку</button>
+                    <button class="small danger" onclick={() => remove('users/' + user.id, 'Удалить пользователя и все его устройства и правила?')}>Удалить</button></div></td></tr>
               {/each}</tbody>
             </table></div>{/if}
           </section>
@@ -309,11 +410,33 @@
             <div class="between"><h2>Правила маршрутизации</h2><input class="search" aria-label="Поиск правил" placeholder="Поиск по шаблону" bind:value={search} /></div>
             {#if !data.rules.length}<p class="empty">Добавьте правило для сайта или приложения.</p>
             {:else}<div class="table-scroll"><table>
-              <thead><tr><th>Шаблон</th><th>Область</th><th>Маршрут</th><th>Действия</th></tr></thead>
+              <thead><tr><th>Шаблон</th><th>Область</th><th>Маршрут</th><th>Статус</th><th>Действия</th></tr></thead>
               <tbody>{#each data.rules.filter(r => matches(r.pattern, username(r.userId))) as rule (rule.id)}
                 <tr><td data-label="Шаблон" class="mono">{rule.pattern}</td><td data-label="Область">{scopeOf(rule)}{rule.userId ? ' · ' + username(rule.userId) : ''}</td>
-                  <td data-label="Маршрут">{actionNames[rule.action]}</td><td><div class="flex"><button class="small" onclick={() => open('rule', rule)}>Изменить</button>
+                  <td data-label="Маршрут">{actionNames[rule.action]}</td>
+                  <td data-label="Статус"><button class="small" disabled={busy} onclick={() => toggleRule(rule)}>{rule.enabled !== false ? 'Вкл' : 'Выкл'}</button></td>
+                  <td><div class="flex"><button class="small" onclick={() => open('rule', rule)}>Изменить</button>
                     <button class="small danger" onclick={() => remove('rules/' + rule.id, 'Удалить правило?')}>Удалить</button></div></td></tr>
+              {/each}</tbody>
+            </table></div>{/if}
+          </section>
+        {:else if view === 'groups'}
+          <section class="card stack">
+            <div class="between"><h2>Группы сервисов</h2><input class="search" aria-label="Поиск групп" placeholder="Поиск групп" bind:value={search} /></div>
+            <p class="label">Объединяйте домены, IP-адреса и приложения Windows/Android в один сервис с общим маршрутом.</p>
+            {#if !data.groups.length}<p class="empty">Создайте группу сервисов, например ChatGPT или Рабочие ресурсы.</p>
+            {:else}<div class="table-scroll"><table>
+              <thead><tr><th>Название</th><th>Область</th><th>Состав</th><th>Маршрут</th><th>Статус</th><th>Действия</th></tr></thead>
+              <tbody>{#each data.groups.filter(g => matches(g.name, username(g.userId), ...g.entries.map(e => e.pattern))) as group (group.id)}
+                <tr>
+                  <td data-label="Название"><strong>{group.name}</strong></td>
+                  <td data-label="Область">{group.locked ? 'Обязательное' : group.userId ? 'PERSONAL · ' + username(group.userId) : 'GLOBAL'}</td>
+                  <td data-label="Состав"><span class="mono">{group.entries.length}</span>{#if group.entries.length} <small class="muted">{group.entries.slice(0, 2).map(e => e.pattern).join(', ')}{group.entries.length > 2 ? '…' : ''}</small>{/if}</td>
+                  <td data-label="Маршрут">{actionNames[group.action]}</td>
+                  <td data-label="Статус"><button class="small" disabled={busy} onclick={() => toggleGroup(group)}>{group.enabled ? 'Вкл' : 'Выкл'}</button></td>
+                  <td><div class="flex"><button class="small" onclick={() => open('group', group)}>Изменить</button>
+                    <button class="small danger" onclick={() => remove('groups/' + group.id, 'Удалить группу сервисов?')}>Удалить</button></div></td>
+                </tr>
               {/each}</tbody>
             </table></div>{/if}
           </section>
@@ -467,8 +590,42 @@
             <div class="field-row"><label>Адрес<input name="host" value={editingProxy?.host ?? ''} required /></label>
               <label>Порт<input name="port" type="number" min="1" max="65535" value={editingProxy?.port ?? 8080} required /></label></div>
             <div class="field-row"><label>Логин<input name="username" autocomplete="off" /></label><label>Пароль<input name="password" type="password" autocomplete="new-password" /></label></div>
+            <label>HTTP-заголовки (опционально, по строке <code>Имя: Значение</code>)
+              <textarea name="headers" rows="3" bind:value={proxyHeadersText} placeholder="X-Custom-Auth: token"></textarea>
+            </label>
             {#if editingProxy}<small class="muted">Введите действующие учётные данные для проверки новой конфигурации.</small>{/if}
             <label class="check"><input name="tls" type="checkbox" checked={Boolean(editingProxy?.tls)} /> TLS к прокси</label>
+          {:else if dialog === 'group'}
+            <label>Название<input required maxlength="100" bind:value={groupName} placeholder="Например, ChatGPT" /></label>
+            <div class="field-row">
+              <label>Область<select bind:value={userId}><option value="">GLOBAL</option>{#each data.users as user}<option value={user.id}>PERSONAL · {user.name}</option>{/each}</select></label>
+              <label>Маршрут<select bind:value={groupAction}>{#each Object.entries(actionNames) as [action, name]}<option value={action}>{name}</option>{/each}</select></label>
+            </div>
+            <div class="field-row">
+              <label class="check"><input type="checkbox" bind:checked={groupEnabled} /> Группа включена</label>
+              <label class="check"><input type="checkbox" bind:checked={groupLocked} /> Приоритет над локальными правилами</label>
+            </div>
+            <div class="stack entries-box">
+              <span class="label">Элементы группы ({groupEntries.length})</span>
+              <div class="entry-add">
+                <select bind:value={newEntryKind}>
+                  {#each Object.entries(entryKindNames) as [kind, label]}<option value={kind}>{label}</option>{/each}
+                </select>
+                <input bind:value={newEntryPattern} placeholder={newEntryKind === 'ip_cidr' ? '1.2.3.0/24' : newEntryKind === 'process' ? 'app.exe' : newEntryKind === 'package' ? 'com.example.app' : 'example.com'}
+                  onkeydown={e => { if (e.key === 'Enter') { e.preventDefault(); addGroupEntry() } }} />
+                <button type="button" class="small" onclick={addGroupEntry}>Добавить</button>
+              </div>
+              {#if groupEntries.length}
+                <div class="entries-list">
+                  {#each groupEntries as entry, i (entry.kind + ':' + entry.pattern)}
+                    <div class="between entry-row">
+                      <span><span class="badge">{entryKindNames[entry.kind]}</span> <code class="mono">{entry.pattern}</code></span>
+                      <button type="button" class="small ghost" aria-label="Удалить элемент" onclick={() => groupEntries = groupEntries.filter((_, idx) => idx !== i)}><X size={14} /></button>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+            </div>
           {:else}
             <label>Область<select bind:value={userId} disabled={Boolean(editingRule)}><option value="">GLOBAL</option>{#each data.users as user}<option value={user.id}>PERSONAL · {user.name}</option>{/each}</select></label>
             <div class="field-row"><label>Тип<select name="kind" bind:value={ruleKind} disabled={Boolean(editingRule)}>
@@ -476,6 +633,7 @@
             </select>{#if editingRule}<input type="hidden" name="kind" value={editingRule.kind} />{/if}</label>
             <label>Шаблон<input name="pattern" value={editingRule?.pattern ?? ''} readonly={Boolean(editingRule)} placeholder={ruleKind === 'package' ? 'com.example.app' : ruleKind === 'process' ? 'Имя или полный путь EXE' : 'example.com'} required /></label></div>
             <label>Маршрут<select name="action" value={editingRule?.action ?? 'PROXY'}>{#each Object.entries(actionNames) as [action, name]}<option value={action}>{name}</option>{/each}</select></label>
+            <label class="check"><input name="enabled" type="checkbox" checked={editingRule?.enabled !== false} /> Правило включено</label>
             {#if ruleKind === 'domain' || ruleKind === 'suffix'}<label class="check"><input name="locked" type="checkbox" checked={Boolean(editingRule?.locked)} /> Приоритет над локальными правилами</label>{/if}
           {/if}
           <button class="primary" disabled={busy}>{busy ? 'Сохранение…' : dialog === 'invite' ? 'Создать ссылку' : 'Сохранить'}</button>
@@ -508,8 +666,14 @@
   .node div { display: grid; }
   .node :global(svg), .topology :global(.edge) { color: var(--accent); flex: none; }
   .search { width: min(100%, 240px); min-height: 36px; }
-  dialog { width: min(540px, calc(100% - 24px)); max-height: calc(100% - 24px); overflow: auto; padding: 24px; background: var(--surface); color: var(--text); border: 1px solid #425168; border-radius: 12px; }
+  dialog { width: min(580px, calc(100% - 24px)); max-height: calc(100% - 24px); overflow: auto; padding: 24px; background: var(--surface); color: var(--text); border: 1px solid #425168; border-radius: 12px; }
   dialog::backdrop { background: rgb(5 8 13 / .72); }
+  textarea { width: 100%; background: #111720; color: var(--text); border: 1px solid #344152; border-radius: 7px; padding: 8px 11px; font: inherit; resize: vertical; }
+  .entries-box { gap: 10px; border: 1px solid var(--border); padding: 12px; border-radius: 8px; background: var(--raised); }
+  .entry-add { display: grid; grid-template-columns: 160px minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+  .entries-list { display: grid; gap: 6px; max-height: 180px; overflow: auto; }
+  .entry-row { padding: 4px 0; border-bottom: 1px solid var(--border); }
+  .entry-row:last-child { border-bottom: 0; }
   @media (max-width: 1100px) { .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   @media (max-width: 800px) {
     .shell { display: block; }
@@ -521,6 +685,7 @@
     .topology :global(.edge) { transform: rotate(90deg); margin-left: 16px; }
   }
   @media (max-width: 560px) {
+    .entry-add { grid-template-columns: 1fr; }
     table, tbody, tr, td { display: block; }
     thead { position: absolute; clip-path: inset(50%); width: 1px; height: 1px; overflow: hidden; }
     tr { border-top: 1px solid var(--border); padding: 10px 0; }

@@ -1,4 +1,4 @@
-body { width: min(390px, 100vw); min-height: 220px; }
+body { width: min(410px, 100vw); min-height: 240px; }
 header { padding: 12px 16px; background: var(--sidebar); border-bottom: 1px solid var(--border); }
 header img { border-radius: 7px; }
 main { padding: 13px; }
@@ -6,8 +6,15 @@ main { padding: 13px; }
 [hidden] { display: none !important; }
 h1 { font-size: 1.25rem; }
 h2 { overflow-wrap: anywhere; }
-details { min-width: 0; border-top: 1px solid var(--border); padding-top: 12px; font-size: .85rem; }
-summary { cursor: pointer; padding-bottom: 6px; }
-#resources { gap: 8px; max-height: 148px; overflow-y: auto; margin-top: 10px; }
+.mode-tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.mode-tabs button.current { background: #223355; border-color: #344c79; color: #b7caff; font-weight: 600; }
+.quick-actions { display: grid; gap: 8px; }
+.manual-body { margin-top: 10px; }
+.port-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: end; }
+details { min-width: 0; border-top: 1px solid var(--border); padding-top: 10px; font-size: .85rem; }
+summary { cursor: pointer; padding-bottom: 4px; }
+#resources, #local-rules { gap: 8px; max-height: 150px; overflow-y: auto; margin-top: 8px; }
 #resources label { overflow-wrap: anywhere; }
 #resources input { flex: none; }
+.local-rule-item { padding: 6px 0; border-bottom: 1px solid var(--border); gap: 6px; }
+.local-rule-item:last-child { border-bottom: 0; }

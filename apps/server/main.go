@@ -40,7 +40,7 @@ var migrations embed.FS
 var bundledAdmin fs.FS
 
 const apiVersion = 1
-const schemaVersion = 2
+const schemaVersion = 3
 
 var releaseVersion = "0.1.2"
 
@@ -324,6 +324,7 @@ func (s *server) clientRoutes(r *http.ServeMux) {
 	r.HandleFunc("GET /api/v1/config", s.config)
 	r.HandleFunc("POST /api/v1/ack", s.ack)
 	r.HandleFunc("PUT /api/v1/personal-rules", s.personalRule)
+	r.HandleFunc("DELETE /api/v1/personal-rules/{id}", s.deletePersonalRule)
 	r.HandleFunc("GET /connect", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		fmt.Fprintln(w, "Скопируйте ссылку целиком и вставьте в HomeProxy.")
@@ -370,6 +371,7 @@ func (s *server) adminRoutes(r *http.ServeMux) {
 	r.HandleFunc("PUT /api/v1/admin/client-update-policy", s.admin(s.clientUpdatePolicy))
 	r.HandleFunc("POST /api/v1/admin/users", s.admin(s.user))
 	r.HandleFunc("PUT /api/v1/admin/users/{id}", s.admin(s.user))
+	r.HandleFunc("DELETE /api/v1/admin/users/{id}", s.admin(s.deleteUser))
 	r.HandleFunc("PUT /api/v1/admin/proxies", s.admin(s.proxy))
 	r.HandleFunc("DELETE /api/v1/admin/proxies/{id}", s.admin(s.deleteProxy))
 	r.HandleFunc("PUT /api/v1/admin/routes", s.admin(s.routes))
@@ -377,6 +379,8 @@ func (s *server) adminRoutes(r *http.ServeMux) {
 	r.HandleFunc("DELETE /api/v1/admin/devices/{id}", s.admin(s.revoke))
 	r.HandleFunc("PUT /api/v1/admin/rules", s.admin(s.adminRule))
 	r.HandleFunc("DELETE /api/v1/admin/rules/{id}", s.admin(s.deleteRule))
+	r.HandleFunc("PUT /api/v1/admin/groups", s.admin(s.saveGroup))
+	r.HandleFunc("DELETE /api/v1/admin/groups/{id}", s.admin(s.deleteGroup))
 	r.HandleFunc("POST /api/v1/admin/probes/{id}", s.admin(s.probe))
 	r.HandleFunc("POST /api/v1/admin/backups", s.admin(s.backup))
 	if s.cfg.AdminDir == nil {
@@ -458,6 +462,20 @@ func (s *server) health(w http.ResponseWriter, req *http.Request) {
 	})
 }
 
+func resolveConfigPath(path string) (string, error) {
+	if path == "server.json" {
+		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+			if exe, exeErr := os.Executable(); exeErr == nil {
+				candidate := filepath.Join(filepath.Dir(exe), "server.json")
+				if _, statErr := os.Stat(candidate); statErr == nil {
+					path = candidate
+				}
+			}
+		}
+	}
+	return filepath.Abs(path)
+}
+
 func run(ctx context.Context) error {
 	config := flag.String("config", "server.json", "server settings file")
 	gen := flag.Bool("generate-token", false, "print an administrative token and exit")
@@ -471,7 +489,7 @@ func run(ctx context.Context) error {
 		fmt.Println(randomToken())
 		return nil
 	}
-	path, err := filepath.Abs(*config)
+	path, err := resolveConfigPath(*config)
 	if err != nil {
 		return err
 	}
@@ -524,6 +542,13 @@ func run(ctx context.Context) error {
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	if len(os.Args) > 1 && os.Args[1] == "ctl" {
+		if err := runCLI(ctx, os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := runPlatform(ctx); err != nil {
 		log.Fatal(err)
 	}

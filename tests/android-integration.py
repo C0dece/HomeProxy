@@ -216,7 +216,7 @@ def test(args, root):
 
         stack.callback(stop_server)
         health = loopback.eventual(lambda: loopback.request(api, "GET", "/healthz")[0], "Android fixture server")
-        assert health["ready"] and health["dbSchema"] == 2
+        assert health["ready"] and health["dbSchema"] == 3
         sockets = [f"tcp:{port}" for port in (api, tunnel, probe.server_port, provider.server_port)]
         if args.update_apk:
             release = release_fixture(args, root)
@@ -335,7 +335,7 @@ def test(args, root):
 
         loopback.eventual(press_ok, "VPN consent dialog", 24)
 
-        loopback.eventual(lambda: ctl("status")["route"]["selected"] == "home", "Android VLESS route", 35)
+        loopback.eventual(lambda: ctl("status")["route"]["selected"] == "direct-0", "Android direct-0 route", 35)
         loopback.eventual(proxied, "Android HTTP through VLESS")
         apk_version = re.search(rb"versionName=([^\s]+)", adb("shell", "dumpsys", "package", APP)).group(1).decode()
         def reported_version():
@@ -386,7 +386,7 @@ def test(args, root):
             print("PASS Android DNS, IPv6, UDP blocking and TUN across emulated network switches", flush=True)
         def active_screen():
             content = ctl("ui-text")
-            return "Остановить VPN" in content and "HomeProxy Server" in content
+            return "Выключить" in content and "Android QA CONNECT" in content
 
         loopback.eventual(active_screen, "Android status screen", 15)
         shot = Path("dist/qa/android-vpn.png")
@@ -412,7 +412,7 @@ def test(args, root):
         assert legacy_tag != android_tag
         assert {rule["id"] for rule in legacy["rules"]} == {"old-site", "old-exe"}
         assert {rule["id"] for rule in android["rules"]} == {"old-site", global_rule["id"]}
-        assert ctl("sync")["route"]["selected"] == "home"
+        assert ctl("sync")["route"]["selected"] == "direct-0"
         assert not network(PROBE_APP), "GLOBAL package BLOCK did not block its app"
         assert proxied(), "GLOBAL package BLOCK affected another UID"
         assert ctl("ui-apps")
@@ -517,7 +517,7 @@ def test(args, root):
             print("PASS Android manifest signature, corrupt APK rejection and PackageInstaller upgrade preserving profiles", flush=True)
 
         stop_server()
-        loopback.eventual(lambda: ctl("status")["route"]["selected"] == "backup-0", "Android offline backup", 35)
+        loopback.eventual(lambda: ctl("status")["route"]["selected"] == "direct-0", "Android offline direct-0", 35)
         assert proxied(), "Android fallback did not deliver HTTP"
 
         adb("shell", "am", "force-stop", APP)
@@ -525,7 +525,7 @@ def test(args, root):
         loopback.eventual(lambda: ctl("status").get("revision"), "Android cached configuration")
         loopback.eventual(lambda: ctl("ui-vpn", {"enabled": True}), "Start VPN offline")
         loopback.eventual(press_ok, "VPN permission after restart", 24)
-        loopback.eventual(lambda: ctl("status")["route"]["selected"] == "backup-0", "Android restored offline backup", 35)
+        loopback.eventual(lambda: ctl("status")["route"]["selected"] == "direct-0", "Android restored offline direct-0", 35)
         assert proxied(), "VPN did not restore HTTP traffic after a cold offline start"
         print("PASS Android cold restart using the encrypted offline configuration", flush=True)
 

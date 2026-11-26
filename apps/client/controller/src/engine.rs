@@ -364,9 +364,14 @@ impl Engine {
             .as_ref()
             .map(|g| g.candidates.as_slice())
             .unwrap_or(&[]);
+        let primary = candidates.first().map(|c| c.tag.as_str());
+        let fallback = self
+            .selected
+            .as_deref()
+            .is_some_and(|tag| primary.is_some_and(|first| first != tag));
         json!({
             "selected": self.selected,
-            "fallback": self.selected.as_deref().is_some_and(|tag| tag.starts_with("backup-")),
+            "fallback": fallback,
             "serverDirectAvailable": self.direct_available,
             "candidates": candidates.iter().map(|c| json!({"tag": c.tag, "name": c.name,
                 "available": self.health.get(&c.tag).copied().unwrap_or(0) > 0})).collect::<Vec<_>>()

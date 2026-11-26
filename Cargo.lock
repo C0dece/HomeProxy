@@ -1448,6 +1448,7 @@ dependencies = [
  "homeproxy-agent",
  "jni 0.21.1",
  "ring",
+ "serde",
  "serde_json",
  "tauri",
  "tauri-build",

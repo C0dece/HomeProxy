@@ -1,12 +1,14 @@
-import type { Rule } from '../../../packages/shared/models'
+import type { Rule, ServiceGroup } from '../../../packages/shared/models'
 
 export type User = { id: string; name: string }
-export type Proxy = User & { host: string; port: number; tls: number }
+export type Proxy = User & { host: string; port: number; tls: number; headers?: Record<string, string> }
 export type Device = {
   id: string; userId: string; label: string; transport: string; ackRevision: number; status: string; seen: number; expires: number
   platform?: 'windows' | 'android' | 'browser' | ''
   installedVersion?: string
   reportedAt?: number
+  online?: boolean
+  activeConnections?: number
 }
 export type Event = { revision: number; event: string; time: number }
 export type UpdatePolicy = { managed: boolean; paused: boolean }
@@ -25,6 +27,7 @@ export type State = {
   proxies: Proxy[]
   routes: { userId: string; proxyId: string; priority: number }[]
   rules: Rule[]
+  groups: ServiceGroup[]
   audit: Event[]
 }
 
@@ -33,12 +36,14 @@ const errors: Record<string, string> = {
   update_policy_unavailable: 'Не удалось сохранить политику обновлений.',
   unauthorized: 'Проверьте ключ администратора.',
   name_taken: 'Это имя уже используется.',
-  proxy_unreachable: 'Контрольный запрос через прокси не прошёл. Проверьте адрес и учётные данные.',
-  invalid_proxy: 'Проверьте адрес, порт и учётные данные.',
+  proxy_unreachable: 'Контрольный запрос через прокси не прошёл. Проверьте адрес, учётные данные и заголовки.',
+  invalid_proxy: 'Проверьте адрес, порт, учётные данные и заголовки.',
   invalid_rule: 'Проверьте шаблон и действие правила.',
+  invalid_group: 'Проверьте название группы, маршрут и записи.',
   invalid_invite: 'Проверьте название устройства и срок действия ссылки.',
   invalid_name: 'Укажите имя пользователя.',
   rule_conflict: 'Пока вы редактировали правило, оно изменилось. Обновите панель.',
+  group_conflict: 'Пока вы редактировали группу, она изменилась. Обновите панель.',
   not_found: 'Запись не найдена. Обновите панель.'
 }
 

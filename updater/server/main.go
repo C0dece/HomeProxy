@@ -14,6 +14,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -147,9 +148,23 @@ func open(source string, local bool) (io.ReadCloser, error) {
 	if err != nil || u.Host == "" || u.Scheme != "https" || u.User != nil {
 		return nil, errors.New("download URL must use HTTPS")
 	}
-	res, err := client.Get(u.String())
+	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
 	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "HomeProxy-Updater")
+	res, err := client.Do(req)
+	if err != nil {
+		var netErr net.Error
+		if errors.As(err, &netErr) {
+			return nil, errors.New("release source unreachable (network or timeout)")
+		}
 		return nil, errors.New("release download failed")
+	}
+	if res.StatusCode == http.StatusTooManyRequests ||
+		(res.StatusCode == http.StatusForbidden && res.Header.Get("X-RateLimit-Remaining") == "0") {
+		res.Body.Close()
+		return nil, errors.New("GitHub API rate limit exceeded")
 	}
 	if res.StatusCode != http.StatusOK {
 		res.Body.Close()
@@ -213,7 +228,7 @@ func run() error {
 	platform := flag.String("platform", runtime.GOOS, "target operating system")
 	arch := flag.String("arch", runtime.GOARCH, "target architecture")
 	api := flag.Int("api", 1, "required API version")
-	schema := flag.Int("db-schema", 2, "required database schema")
+	schema := flag.Int("db-schema", 3, "required database schema")
 	apply := flag.Bool("apply-service", false, "install a verified release into the local HomeProxyServer service")
 	recoverUpdate := flag.Bool("recover-service", false, "restore the previous version after an interrupted local update")
 	flag.Parse()

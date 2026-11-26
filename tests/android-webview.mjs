@@ -95,7 +95,7 @@ function invoke({ command, data }) {
     return true
   }
   if (command === 'ui-vpn') {
-    const label = data.enabled ? 'Запустить VPN' : 'Остановить VPN'
+    const label = data.enabled ? 'Включить' : 'Выключить'
     const button = [...document.querySelectorAll('button')].find(item => item.textContent.trim() === label)
     if (!button || button.disabled) return false
     button.click()

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -129,7 +130,7 @@ func (e *engine) replace(data []byte) error {
 
 func (e *engine) supervise(ctx context.Context, lock *sync.Mutex) {
 	go func() {
-		tick := time.NewTicker(2 * time.Second)
+		tick := time.NewTicker(5 * time.Second)
 		defer tick.Stop()
 		for {
 			select {
@@ -160,13 +161,66 @@ type queryer interface {
 }
 
 type proxyInfo struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Host     string `json:"host"`
-	Port     int    `json:"port"`
-	TLS      bool   `json:"tls"`
-	Username string `json:"username,omitempty"`
-	Password string `json:"password,omitempty"`
+	ID       string            `json:"id"`
+	Name     string            `json:"name"`
+	Host     string            `json:"host"`
+	Port     int               `json:"port"`
+	TLS      bool              `json:"tls"`
+	Username string            `json:"username,omitempty"`
+	Password string            `json:"password,omitempty"`
+	Headers  map[string]string `json:"headers,omitempty"`
+}
+
+func decodeHeaders(raw string) map[string]string {
+	if raw == "" || raw == "{}" {
+		return nil
+	}
+	var parsed map[string]string
+	if json.Unmarshal([]byte(raw), &parsed) != nil || len(parsed) == 0 {
+		return nil
+	}
+	return parsed
+}
+
+func (e *engine) activeDevices(ctx context.Context) map[string]int {
+	counts := map[string]int{}
+	if e.control == "" {
+		return counts
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, 400*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, "GET", "http://"+e.control+"/connections", nil)
+	if err != nil {
+		return counts
+	}
+	req.Header.Set("Authorization", "Bearer "+e.token)
+	resp, err := engineHTTP.Do(req)
+	if err != nil {
+		return counts
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return counts
+	}
+	var payload struct {
+		Connections []struct {
+			Metadata struct {
+				User string `json:"user"`
+			} `json:"metadata"`
+		} `json:"connections"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&payload) != nil {
+		return counts
+	}
+	for _, conn := range payload.Connections {
+		user := conn.Metadata.User
+		if id, ok := strings.CutSuffix(user, "-proxy"); ok && id != "" {
+			counts[id]++
+		} else if id, ok := strings.CutSuffix(user, "-direct"); ok && id != "" {
+			counts[id]++
+		}
+	}
+	return counts
 }
 
 type endpoint struct {
@@ -180,7 +234,7 @@ type endpoint struct {
 }
 
 func (s *server) proxies(q queryer, user string) ([]proxyInfo, error) {
-	query := "SELECT p.id,p.name,p.host,p.port,p.tls,p.credentials FROM proxies p JOIN routes r ON r.proxy_id=p.id WHERE r.user_id=? ORDER BY r.priority"
+	query := "SELECT p.id,p.name,p.host,p.port,p.tls,p.credentials,p.headers FROM proxies p JOIN routes r ON r.proxy_id=p.id WHERE r.user_id=? ORDER BY r.priority"
 	rows, err := q.Query(query, user)
 	if err != nil {
 		return nil, err
@@ -190,7 +244,8 @@ func (s *server) proxies(q queryer, user string) ([]proxyInfo, error) {
 	for rows.Next() {
 		var p proxyInfo
 		var sealed []byte
-		if err := rows.Scan(&p.ID, &p.Name, &p.Host, &p.Port, &p.TLS, &sealed); err != nil {
+		var rawHeaders string
+		if err := rows.Scan(&p.ID, &p.Name, &p.Host, &p.Port, &p.TLS, &sealed, &rawHeaders); err != nil {
 			return nil, err
 		}
 		data, err := s.secrets.Open(nil, nil, sealed, []byte(p.ID))
@@ -202,6 +257,7 @@ func (s *server) proxies(q queryer, user string) ([]proxyInfo, error) {
 			return nil, err
 		}
 		p.Username, p.Password = credentials[0], credentials[1]
+		p.Headers = decodeHeaders(rawHeaders)
 		result = append(result, p)
 	}
 	return result, rows.Err()
@@ -259,6 +315,9 @@ func (s *server) coreConfig(q queryer) ([]byte, error) {
 					"username": p.Username, "password": p.Password}
 				if p.TLS {
 					out["tls"] = obj{"enabled": true, "server_name": p.Host}
+				}
+				if len(p.Headers) > 0 {
+					out["headers"] = p.Headers
 				}
 				outbounds = append(outbounds, out)
 			}

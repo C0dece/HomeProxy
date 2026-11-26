@@ -514,7 +514,7 @@ def test(args, root):
             link = urllib.parse.urlsplit(link)._replace(scheme="https", netloc=f"{named_host}:{named_api.server_port}").geturl()
         status = ctl("connect", {"link": link})
         assert status["linked"] and status["revision"], status
-        eventual(lambda: ctl("status")["route"]["selected"] == "home", "REALITY primary")
+        eventual(lambda: ctl("status")["route"]["selected"] == "direct-0", "direct HTTP primary")
         assert proxied(local, origin.server_port)
         eventual(lambda: reported("Agent QA")["installedVersion"], "Windows installed version report")
         assert reported("Agent QA")["platform"] == "windows"
@@ -635,7 +635,7 @@ def test(args, root):
             assert not (root / "store.sqlite.updates-paused").exists()
 
         terminate(server)
-        eventual(lambda: ctl("status")["route"]["selected"] == "backup-0", "offline backup")
+        eventual(lambda: ctl("status")["route"]["selected"] == "direct-0", "direct HTTP while server down")
         assert proxied(local, origin.server_port)
         if named_host:
             print("PASS STRICT failover through a named HTTP proxy", flush=True)
@@ -666,7 +666,7 @@ def test(args, root):
             assert not direct_dns(), "STRICT leaked UDP DNS after killing the controller"
             print("PASS STRICT blocked direct IPv4 and UDP DNS after controller termination", flush=True)
         agent = start_agent()
-        eventual(lambda: ctl("status")["route"]["selected"] == "backup-0", "cache after offline restart")
+        eventual(lambda: ctl("status")["route"]["selected"] == "direct-0", "cache after offline restart")
         assert proxied(local, origin.server_port)
         ctl("local-rule", {"pattern": "localhost", "kind": "domain", "action": "BLOCK"})
         assert blocked(local, origin.server_port)
@@ -675,7 +675,7 @@ def test(args, root):
         print("PASS offline failover, protected cache restart and LOCAL rules", flush=True)
 
         server = start_server()
-        eventual(lambda: ctl("status")["route"]["selected"] == "home", "primary recovery")
+        eventual(lambda: ctl("status")["route"]["selected"] == "direct-0", "primary ready")
         rule = {"pattern": "localhost", "kind": "domain", "action": "BLOCK"}
         change("PUT", "rules", rule)
         ctl("sync")
@@ -703,9 +703,15 @@ def test(args, root):
         assert proxy_password.encode() not in (root / "agent" / "state.dpapi").read_bytes()
         print("PASS recovery, GLOBAL/PERSONAL/locked rules, conflict, acknowledgements and backup", flush=True)
 
+        ctl("profile", {"profile": "HOME_SERVER"})
+        eventual(lambda: ctl("status")["route"]["selected"] == "home", "HomeProxy Server mode")
+        assert proxied(local, origin.server_port)
+        ctl("profile", {"profile": "AUTO"})
+        eventual(lambda: ctl("status")["route"]["selected"] == "direct-0", "AUTO restored")
+
         terminate(server)
         stop_http(provider)
-        eventual(lambda: ctl("status")["route"]["selected"] == "backup-1", "second backup")
+        eventual(lambda: ctl("status")["route"]["selected"] == "direct-1", "second direct proxy")
         assert proxied(local, origin.server_port)
         if args.tun_vm:
             assert through_tun(tun_hosts[0])

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -145,6 +146,50 @@ func (s *server) user(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *server) deleteUser(w http.ResponseWriter, r *http.Request) {
+	err := s.mutate("user.deleted", true, func(tx *sql.Tx, _ int64) error {
+		return affected(tx.Exec("DELETE FROM users WHERE id=?", r.PathValue("id")))
+	})
+	if !report(w, err) {
+		w.WriteHeader(204)
+	}
+}
+
+func validHeaders(headers map[string]string) (string, bool) {
+	if len(headers) > 16 {
+		return "", false
+	}
+	if len(headers) == 0 {
+		return "{}", true
+	}
+	normalized := make(map[string]string, len(headers))
+	for rawKey, val := range headers {
+		key := strings.TrimSpace(rawKey)
+		if key == "" || len(key) > 128 || len(val) > 1024 || strings.ContainsAny(val, "\r\n\x00") {
+			return "", false
+		}
+		for i := 0; i < len(key); i++ {
+			b := key[i]
+			if b <= 0x20 || b >= 0x7f || b == ':' {
+				return "", false
+			}
+		}
+		lower := strings.ToLower(key)
+		if lower == "host" || lower == "proxy-authorization" {
+			return "", false
+		}
+		if _, dup := normalized[key]; dup {
+			return "", false
+		}
+		normalized[key] = val
+	}
+	encoded, err := json.Marshal(normalized)
+	if err != nil {
+		return "", false
+	}
+	return string(encoded), true
+}
+
 func (s *server) probeProxy(ctx context.Context, p proxyInfo) bool {
 	scheme := "http"
 	if p.TLS {
@@ -158,12 +203,24 @@ func (s *server) probeProxy(ctx context.Context, p proxyInfo) bool {
 		Proxy: http.ProxyURL(proxy), DisableKeepAlives: true,
 		DialContext: (&net.Dialer{Timeout: 3 * time.Second}).DialContext,
 	}
+	if len(p.Headers) > 0 {
+		hdr := make(http.Header, len(p.Headers))
+		for k, v := range p.Headers {
+			hdr.Set(k, v)
+		}
+		tr.ProxyConnectHeader = hdr
+	}
 	defer tr.CloseIdleConnections()
 	client := &http.Client{Transport: tr, Timeout: 6 * time.Second,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
 	req, err := http.NewRequestWithContext(ctx, "HEAD", s.cfg.ProbeURL, nil)
 	if err != nil {
 		return false
+	}
+	if len(p.Headers) > 0 && req.URL.Scheme == "http" {
+		for k, v := range p.Headers {
+			req.Header.Set(k, v)
+		}
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -179,9 +236,10 @@ func (s *server) proxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.Name = strings.TrimSpace(p.Name)
+	headersJSON, headersOK := validHeaders(p.Headers)
 	if p.Name == "" || len(p.Name) > 100 || !validHost(p.Host) || !validPort(p.Port) ||
 		len(p.Username) > 256 || len(p.Password) > 1024 ||
-		strings.ContainsAny(p.Username, ":\r\n") || (p.Username == "" && p.Password != "") {
+		strings.ContainsAny(p.Username, ":\r\n") || (p.Username == "" && p.Password != "") || !headersOK {
 		fail(w, 400, "invalid_proxy")
 		return
 	}
@@ -204,10 +262,10 @@ func (s *server) proxy(w http.ResponseWriter, r *http.Request) {
 			return apiError{409, "name_taken"}
 		}
 		if fresh {
-			_, err := tx.Exec("INSERT INTO proxies(id,name,host,port,tls,credentials) VALUES(?,?,?,?,?,?)", p.ID, p.Name, p.Host, p.Port, p.TLS, sealed)
+			_, err := tx.Exec("INSERT INTO proxies(id,name,host,port,tls,credentials,headers) VALUES(?,?,?,?,?,?,?)", p.ID, p.Name, p.Host, p.Port, p.TLS, sealed, headersJSON)
 			return err
 		}
-		return affected(tx.Exec("UPDATE proxies SET name=?,host=?,port=?,tls=?,credentials=? WHERE id=?", p.Name, p.Host, p.Port, p.TLS, sealed, p.ID))
+		return affected(tx.Exec("UPDATE proxies SET name=?,host=?,port=?,tls=?,credentials=?,headers=? WHERE id=?", p.Name, p.Host, p.Port, p.TLS, sealed, headersJSON, p.ID))
 	})
 	if !report(w, err) {
 		send(w, 200, obj{"id": p.ID})
@@ -357,6 +415,7 @@ type rule struct {
 	Kind     string `json:"kind"`
 	Pattern  string `json:"pattern"`
 	Action   string `json:"action"`
+	Enabled  bool   `json:"enabled"`
 	Locked   bool   `json:"locked"`
 	Revision int64  `json:"revision"`
 }
@@ -389,7 +448,7 @@ func (p *rule) validate() bool {
 }
 
 func (s *server) saveRule(w http.ResponseWriter, r *http.Request, personal bool) {
-	var p rule
+	p := rule{Enabled: true}
 	if !decode(w, r, &p) {
 		return
 	}
@@ -425,13 +484,14 @@ func (s *server) saveRule(w http.ResponseWriter, r *http.Request, personal bool)
 			if p.Revision != current {
 				return apiError{409, "rule_conflict"}
 			}
-			_, err = tx.Exec("UPDATE rules SET action=?,locked=?,revision=? WHERE id=?", p.Action, p.Locked, rev, id)
+			_, err = tx.Exec("UPDATE rules SET action=?,enabled=?,locked=?,revision=? WHERE id=?", p.Action, p.Enabled, p.Locked, rev, id)
 		} else if errors.Is(err, sql.ErrNoRows) {
 			if p.Revision != 0 {
 				return apiError{409, "rule_conflict"}
 			}
 			id = uuid()
-			_, err = tx.Exec("INSERT INTO rules VALUES(?,NULLIF(?,''),?,?,?,?,?)", id, p.UserID, p.Pattern, p.Kind, p.Action, p.Locked, rev)
+			_, err = tx.Exec("INSERT INTO rules(id,user_id,pattern,kind,action,locked,revision,enabled) VALUES(?,NULLIF(?,''),?,?,?,?,?,?)",
+				id, p.UserID, p.Pattern, p.Kind, p.Action, p.Locked, rev, p.Enabled)
 		}
 		p.ID, p.Revision = id, rev
 		return err
@@ -444,6 +504,29 @@ func (s *server) saveRule(w http.ResponseWriter, r *http.Request, personal bool)
 func (s *server) adminRule(w http.ResponseWriter, r *http.Request)    { s.saveRule(w, r, false) }
 func (s *server) personalRule(w http.ResponseWriter, r *http.Request) { s.saveRule(w, r, true) }
 
+func (s *server) deletePersonalRule(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	err := s.mutate("rule.deleted", false, func(tx *sql.Tx, _ int64) error {
+		d, err := identity(tx, r)
+		if err != nil {
+			return err
+		}
+		var userID string
+		var locked bool
+		err = tx.QueryRow("SELECT COALESCE(user_id,''),locked FROM rules WHERE id=?", id).Scan(&userID, &locked)
+		if err != nil {
+			return err
+		}
+		if userID != d.userID || locked {
+			return apiError{403, "forbidden_rule"}
+		}
+		return affected(tx.Exec("DELETE FROM rules WHERE id=? AND user_id=? AND locked=0", id, d.userID))
+	})
+	if !report(w, err) {
+		w.WriteHeader(204)
+	}
+}
+
 func (s *server) deleteRule(w http.ResponseWriter, r *http.Request) {
 	err := s.mutate("rule.deleted", false, func(tx *sql.Tx, _ int64) error {
 		return affected(tx.Exec("DELETE FROM rules WHERE id=?", r.PathValue("id")))
@@ -454,7 +537,7 @@ func (s *server) deleteRule(w http.ResponseWriter, r *http.Request) {
 }
 
 func rules(q queryer, user string, all bool) ([]rule, error) {
-	rows, err := q.Query(`SELECT id,COALESCE(user_id,''),kind,pattern,action,locked,revision FROM rules
+	rows, err := q.Query(`SELECT id,COALESCE(user_id,''),kind,pattern,action,enabled,locked,revision FROM rules
 		WHERE ? OR user_id IS NULL OR user_id=? ORDER BY locked DESC,user_id IS NULL,LENGTH(pattern) DESC,pattern,kind`, all, user)
 	if err != nil {
 		return nil, err
@@ -463,7 +546,7 @@ func rules(q queryer, user string, all bool) ([]rule, error) {
 	result := make([]rule, 0)
 	for rows.Next() {
 		var p rule
-		if err := rows.Scan(&p.ID, &p.UserID, &p.Kind, &p.Pattern, &p.Action, &p.Locked, &p.Revision); err != nil {
+		if err := rows.Scan(&p.ID, &p.UserID, &p.Kind, &p.Pattern, &p.Action, &p.Enabled, &p.Locked, &p.Revision); err != nil {
 			return nil, err
 		}
 		result = append(result, p)
@@ -481,6 +564,10 @@ func (s *server) config(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		tx.Rollback()
 		if delivered {
+			now := time.Now().Unix()
+			if _, err := s.db.Exec("UPDATE devices SET seen=? WHERE id=? AND seen<? AND revoked=0", now, d.id, now-30); err != nil {
+				log.Printf("device seen update failed (%T)", err)
+			}
 			s.recordDeviceRelease(r, d, android)
 		}
 	}()
@@ -510,7 +597,14 @@ func (s *server) config(w http.ResponseWriter, r *http.Request) {
 	policies = slices.DeleteFunc(policies, func(p rule) bool {
 		return p.Kind == "process" && (android || d.transport == "browser") || p.Kind == "package" && !android
 	})
-	result := obj{"api": 1, "deviceId": d.id, "revision": rev, "rules": policies}
+	groups, err := listGroups(tx, d.userID, false, true)
+	if report(w, err) {
+		return
+	}
+	result := obj{
+		"api": 1, "deviceId": d.id, "revision": rev, "rules": policies,
+		"groups": filterGroupEntries(groups, d.transport, android),
+	}
 	if d.transport == "agent" {
 		paused, err := clientUpdatesPaused(tx)
 		if report(w, err) {
@@ -591,7 +685,7 @@ func (s *server) state(w http.ResponseWriter, r *http.Request) {
 	data := obj{}
 	queries := map[string]string{
 		"users":   "SELECT id,name FROM users ORDER BY name",
-		"proxies": "SELECT id,name,host,port,tls FROM proxies ORDER BY name",
+		"proxies": "SELECT id,name,host,port,tls,headers FROM proxies ORDER BY name",
 		"routes":  "SELECT user_id AS userId,proxy_id AS proxyId,priority FROM routes ORDER BY user_id,priority",
 		"devices": `SELECT d.id,d.user_id AS userId,d.label,d.transport,d.ack_revision AS ackRevision,d.seen,d.expires,
 			COALESCE(r.platform,'') AS platform,COALESCE(r.version,'') AS installedVersion,COALESCE(r.reported_at,0) AS reportedAt,
@@ -606,11 +700,33 @@ func (s *server) state(w http.ResponseWriter, r *http.Request) {
 		}
 		data[k] = value
 	}
+	if proxies, ok := data["proxies"].([]obj); ok {
+		for _, p := range proxies {
+			raw, _ := p["headers"].(string)
+			p["headers"] = decodeHeaders(raw)
+		}
+	}
+	active := s.core.activeDevices(r.Context())
+	now := time.Now().Unix()
+	if devices, ok := data["devices"].([]obj); ok {
+		for _, d := range devices {
+			id, _ := d["id"].(string)
+			status, _ := d["status"].(string)
+			seen, _ := d["seen"].(int64)
+			conns := active[id]
+			d["activeConnections"] = conns
+			d["online"] = status == "connected" && (conns > 0 || (seen > 0 && now-seen <= 90))
+		}
+	}
 	data["revision"], err = revision(tx)
 	if report(w, err) {
 		return
 	}
 	data["rules"], err = rules(tx, "", true)
+	if report(w, err) {
+		return
+	}
+	data["groups"], err = listGroups(tx, "", true, false)
 	if !report(w, err) {
 		send(w, 200, data)
 	}
@@ -619,8 +735,9 @@ func (s *server) state(w http.ResponseWriter, r *http.Request) {
 func (s *server) probe(w http.ResponseWriter, r *http.Request) {
 	var p proxyInfo
 	var sealed []byte
-	err := s.db.QueryRow("SELECT id,name,host,port,tls,credentials FROM proxies WHERE id=?", r.PathValue("id")).
-		Scan(&p.ID, &p.Name, &p.Host, &p.Port, &p.TLS, &sealed)
+	var rawHeaders string
+	err := s.db.QueryRow("SELECT id,name,host,port,tls,credentials,headers FROM proxies WHERE id=?", r.PathValue("id")).
+		Scan(&p.ID, &p.Name, &p.Host, &p.Port, &p.TLS, &sealed, &rawHeaders)
 	if report(w, err) {
 		return
 	}
@@ -633,6 +750,7 @@ func (s *server) probe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.Username, p.Password = cred[0], cred[1]
+	p.Headers = decodeHeaders(rawHeaders)
 	send(w, 200, obj{"reachable": s.probeProxy(r.Context(), p)})
 }
 

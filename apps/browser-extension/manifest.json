@@ -7,6 +7,6 @@
   "icons": { "64": "icon.png" },
   "action": { "default_title": "HomeProxy Browser", "default_popup": "popup.html", "default_icon": "icon.png" },
   "background": { "service_worker": "background.js", "type": "module" },
-  "permissions": ["proxy", "storage", "alarms", "activeTab", "webRequest", "declarativeNetRequestWithHostAccess"],
+  "permissions": ["proxy", "storage", "alarms", "activeTab", "webRequest", "webRequestAuthProvider", "declarativeNetRequestWithHostAccess"],
   "host_permissions": ["http://*/*", "https://*/*"]
 }

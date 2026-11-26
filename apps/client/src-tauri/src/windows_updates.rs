@@ -31,6 +31,10 @@ pub(crate) fn on_startup(app: AppHandle) {
         if ENDPOINT.is_none() || PUBLIC_KEY.is_none() {
             return;
         }
+        let _ = tauri::async_runtime::spawn_blocking(|| {
+            std::thread::sleep(Duration::from_secs(4));
+        })
+        .await;
         let checked = command(&app, "update-check", &json!({"channel":"stable"})).await;
         if let Ok(result) = checked {
             if let Some(version) = result["offer"]["version"].as_str() {
@@ -43,6 +47,25 @@ pub(crate) fn on_startup(app: AppHandle) {
             }
         }
     });
+}
+
+fn classify_check_error(err: &impl std::fmt::Display) -> Option<&'static str> {
+    let msg = err.to_string().to_lowercase();
+    if msg.contains("429") || msg.contains("403") || msg.contains("rate limit") {
+        Some("Превышен лимит запросов GitHub API. Попробуйте позже.")
+    } else if msg.contains("timed out") || msg.contains("timeout") {
+        Some("Превышено время ожидания ответа от сервера обновлений.")
+    } else if msg.contains("dns")
+        || msg.contains("connect")
+        || msg.contains("network")
+        || msg.contains("offline")
+        || msg.contains("hyper")
+        || msg.contains("error sending request")
+    {
+        Some("Нет подключения к сети или сервер обновлений недоступен.")
+    } else {
+        None
+    }
 }
 
 pub(crate) async fn command<R: tauri::Runtime>(
@@ -83,15 +106,25 @@ pub(crate) async fn command<R: tauri::Runtime>(
             if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
                 return Err("Источник обновлений должен использовать HTTPS".into());
             }
-            let update = app
+            let check_result = app
                 .updater_builder()
                 .pubkey(key)
                 .endpoints(vec![url])
-                .and_then(|builder| builder.timeout(Duration::from_secs(90)).build())
-                .map_err(|_| "Не удалось настроить обновления Windows")?
+                .and_then(|builder| builder.timeout(Duration::from_secs(25)).build())
+                .map_err(|_| "Не удалось настроить обновления Windows".to_string())?
                 .check()
-                .await
-                .map_err(|_| "Не удалось получить выпуск Windows")?;
+                .await;
+            let update = match check_result {
+                Ok(found) => found,
+                Err(err) => {
+                    if let Some(soft) = classify_check_error(&err) {
+                        notice = Some(soft);
+                        None
+                    } else {
+                        return Err("Не удалось получить выпуск Windows".into());
+                    }
+                }
+            };
             if let Some(update) = update {
                 let min = update.raw_json["apiMin"].as_u64();
                 let max = update.raw_json["apiMax"].as_u64();
@@ -184,7 +217,11 @@ async fn resume_controller() -> Result<(), String> {
     {
         return Ok(());
     }
+    let mode = fs::read_to_string(&marker).unwrap_or_default();
     super::start_agent().await?;
+    if mode.trim() == "tun" && super::windows_mode::tun_task_installed() {
+        let _ = tauri::async_runtime::spawn_blocking(|| super::windows_mode::switch(true)).await;
+    }
     match fs::remove_file(marker) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -199,13 +236,18 @@ fn stop_controller() -> Result<bool, String> {
     }
     let directory = default_dir()?;
     let status = control(&directory, CONTROL_PORT, "status", &Value::Null)?;
-    if status["tun"] == true {
-        return Err("Остановите системный режим TUN перед обновлением Windows".into());
+    if status["strict"] == true {
+        return Err("Отключите строгий режим перед обновлением Windows".into());
     }
-    fs::write(resume_marker(&directory), [])
+    let mode_tag = if status["tun"] == true {
+        "tun"
+    } else {
+        "local"
+    };
+    fs::write(resume_marker(&directory), mode_tag)
         .map_err(|_| "Не удалось сохранить запуск контроллера после обновления")?;
     control(&directory, CONTROL_PORT, "shutdown", &Value::Null)?;
-    let wait = Instant::now() + Duration::from_secs(4);
+    let wait = Instant::now() + Duration::from_secs(8);
     while Instant::now() < wait {
         if TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_err() {
             return Ok(true);

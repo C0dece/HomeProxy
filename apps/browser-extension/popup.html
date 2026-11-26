@@ -8,7 +8,12 @@
   <body>
     <header class="between"><div class="flex"><img src="icon.png" width="32" height="32" alt=""><strong>HomeProxy</strong></div><span class="badge" id="status">Загрузка</span></header>
     <main class="stack">
+      <div class="mode-tabs" role="tablist" aria-label="Режим расширения">
+        <button type="button" id="mode-agent" class="small">С агентом</button>
+        <button type="button" id="mode-standalone" class="small">Автономный</button>
+      </div>
       <p class="notice warning" role="status" id="notice" hidden></p>
+      <p class="notice" id="update-banner" hidden></p>
       <form class="card stack" id="connect" hidden>
         <h1>Подключить браузер</h1>
         <label>Персональная ссылка <input id="link" type="password" placeholder="https://…/connect#…" required autocomplete="off"></label>
@@ -17,26 +22,73 @@
       <section class="card stack" id="route" hidden>
         <div class="between"><h2 id="domain"></h2><span class="label mono" id="revision"></span></div>
         <p class="label" id="current"></p>
-        <div class="field-row">
-          <label>Область <select id="scope"><option>LOCAL</option><option>PERSONAL</option></select></label>
-          <label>Маршрут <select id="action"><option value="PROXY">PROXY</option><option value="LOCAL_DIRECT">DIRECT</option><option value="AUTO">AUTO</option><option value="BLOCK">BLOCK</option><option value="SERVER_DIRECT">SERVER DIRECT</option><option value="INHERIT">Наследовать</option></select></label>
+        <div class="quick-actions">
+          <button type="button" class="primary small" id="quick-single">Через прокси: только этот адрес</button>
+          <button type="button" class="small" id="quick-site">Весь сайт + внешние (0)</button>
         </div>
-        <label class="check"><input type="checkbox" id="subdomains"> Включить поддомены</label>
-        <details id="details">
-          <summary>Ресурсы вкладки <span class="muted" id="count"></span></summary>
-          <p class="muted">Выбранные домены получают отдельные правила для всех вкладок.</p>
-          <div class="stack" id="resources"></div>
+        <details id="manual-rule">
+          <summary>Точная настройка правила</summary>
+          <div class="stack manual-body">
+            <div class="field-row">
+              <label id="scope-wrap">Область <select id="scope"><option value="LOCAL">На этом устройстве</option><option value="PERSONAL">На сервере (все)</option></select></label>
+              <label>Маршрут <select id="action"><option value="PROXY">Через прокси</option><option value="LOCAL_DIRECT">Напрямую</option><option value="AUTO">Авто</option><option value="BLOCK">Блокировать</option><option value="SERVER_DIRECT">Через сервер</option><option value="INHERIT">Сбросить</option></select></label>
+            </div>
+            <label class="check"><input type="checkbox" id="subdomains"> Включить поддомены</label>
+            <details id="details">
+              <summary>Ресурсы вкладки <span class="muted" id="count"></span></summary>
+              <p class="muted">Выбранные домены получают отдельные правила для всех вкладок.</p>
+              <div class="stack" id="resources"></div>
+            </details>
+            <button class="primary" id="save">Сохранить правило</button>
+          </div>
         </details>
-        <button class="primary" id="save">Сохранить правило</button>
       </section>
       <section class="card stack" id="agent" hidden>
         <h2>HomeProxy Agent</h2>
         <p class="label">Для маршрутизации запустите Agent на этом ПК и подключите его отдельной ссылкой того же пользователя.</p>
+        <form class="port-row" id="port-form">
+          <label>Порт агента <input id="agent-port" type="number" min="1024" max="65531" value="17770" required></label>
+          <button class="small" type="submit" id="save-port">Применить порт</button>
+        </form>
         <div class="flex">
           <button class="small" id="toggle"></button>
           <button class="small" id="sync">Синхронизировать</button>
           <button class="small ghost danger" id="forget">Отвязать</button>
         </div>
+      </section>
+      <section class="card stack" id="standalone" hidden>
+        <h2>Автономный прокси</h2>
+        <form class="stack" id="sa-form">
+          <div class="field-row">
+            <label>Протокол
+              <select id="sa-scheme">
+                <option value="http">HTTP</option>
+                <option value="https">HTTPS</option>
+                <option value="socks5">SOCKS5</option>
+              </select>
+            </label>
+            <label>Порт <input id="sa-port" type="number" min="1" max="65535" value="8080" required></label>
+          </div>
+          <label>Адрес <input id="sa-host" placeholder="proxy.example.com" required></label>
+          <div class="field-row">
+            <label>Логин <input id="sa-user" autocomplete="off" placeholder="Опционально"></label>
+            <label>Пароль <input id="sa-pass" type="password" autocomplete="new-password" placeholder="Опционально"></label>
+          </div>
+          <label>Остальные сайты
+            <select id="sa-default">
+              <option value="direct">Напрямую (только правила через прокси)</option>
+              <option value="proxy">Весь трафик через прокси</option>
+            </select>
+          </label>
+          <div class="flex">
+            <button class="small" type="submit" id="sa-save">Сохранить прокси</button>
+            <button class="primary small" type="button" id="sa-toggle">Включить маршрутизацию</button>
+          </div>
+        </form>
+        <details id="sa-rules-box">
+          <summary>Локальные правила (<span id="local-count">0</span>)</summary>
+          <div class="stack" id="local-rules"></div>
+        </details>
       </section>
     </main>
   </body>

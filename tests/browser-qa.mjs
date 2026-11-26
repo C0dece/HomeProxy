@@ -124,6 +124,7 @@ try {
   await site.bringToFront()
   popup = await openPopup()
   await popup.getByText('app.homeproxy.test', { exact: true }).waitFor()
+  await popup.getByText('Точная настройка правила').click()
   await popup.getByText('Ресурсы вкладки').click()
   await popup.getByText('asset.homeproxy.test', { exact: true }).waitFor()
   await popup.screenshot({ path: join(screenshots, 'browser-popup.png'), clip: { x: 0, y: 0, width: 390, height: 720 } })
@@ -166,7 +167,13 @@ try {
   const agent = await context.newPage()
   await agent.setViewportSize({ width: 820, height: 760 })
   let nativeTun = false
+  let desktopSettings = { autostart: false, autoConnect: false, tunTaskInstalled: false }
   await agent.exposeFunction('agentQA', async (command, data) => {
+    if (command === 'desktop-settings-get') return desktopSettings
+    if (command === 'desktop-settings-set') {
+      desktopSettings = { ...desktopSettings, ...data }
+      return desktopSettings
+    }
     if (command === 'windows-tun') nativeTun = data.tun
     const result = await controller(command === 'windows-tun' ? 'status' : command, data)
     return command === 'status' || command === 'windows-tun' ? { ...result, tun: nativeTun } : result
@@ -176,11 +183,11 @@ try {
   })
   await agent.goto(`http://127.0.0.1:${web.address().port}/`)
   await agent.getByRole('heading', { name: 'Маршрутизация' }).waitFor()
-  await agent.getByRole('button', { name: 'Включить системный TUN' }).click()
-  await agent.getByRole('button', { name: 'Перейти на локальный прокси' }).waitFor()
+  await agent.getByRole('button', { name: 'Включить TUN' }).click()
+  await agent.getByRole('button', { name: 'Выключить TUN' }).waitFor()
   await agent.screenshot({ path: join(screenshots, 'agent-tun.png') })
-  await agent.getByRole('button', { name: 'Перейти на локальный прокси' }).click()
-  await agent.getByRole('button', { name: 'Включить системный TUN' }).waitFor()
+  await agent.getByRole('button', { name: 'Выключить TUN' }).click()
+  await agent.getByRole('button', { name: 'Включить TUN' }).waitFor()
   await agent.screenshot({ path: join(screenshots, 'agent-desktop.png') })
   await agent.setViewportSize({ width: 360, height: 820 })
   await agent.getByRole('button', { name: 'Сайты', exact: true }).click()

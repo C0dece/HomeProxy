@@ -149,7 +149,7 @@ func TestUpdateTransactionWithServer(t *testing.T) {
 	if err := service.start(health{}); err != nil {
 		t.Fatal(err)
 	}
-	const fixtureSchema = 2
+	const fixtureSchema = 3
 	previous := health{Ready: true, Version: "0.1.0", API: 1, DBSchema: fixtureSchema}
 	if err := i.waitReady(previous); err != nil {
 		t.Fatal(err)

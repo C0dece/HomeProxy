@@ -1,4 +1,6 @@
-use crate::policy::{generate, parse_web, tun_dns, Action, Configuration, Ports, Profile, Rule};
+use crate::policy::{
+    generate, parse_web, tun_dns, Action, Configuration, Ports, Profile, ProxyListen, Rule,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -30,10 +32,17 @@ pub fn render(raw: &str) -> Result<Value, String> {
     for rule in input.remote.rules.iter_mut().chain(&mut input.local) {
         rule.normalize()?;
     }
+    for group in &mut input.remote.groups {
+        group.entries.retain(|entry| entry.kind != "process");
+        for entry in &mut group.entries {
+            entry.normalize()?;
+        }
+    }
     let ports = Ports {
         proxy: 0,
         probe: input.probe_port,
         control: input.control_port,
+        listen: ProxyListen::default(),
     };
     let generated = generate(
         &input.remote,
@@ -116,7 +125,7 @@ mod tests {
         assert_eq!(selector["default"], "unavailable");
         assert_eq!(
             selector["outbounds"],
-            json!(["home", "backup-0", "unavailable"])
+            json!(["direct-0", "home", "unavailable"])
         );
         let binary = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../.tools/sing-box-1.14.4-windows-amd64/sing-box.exe");

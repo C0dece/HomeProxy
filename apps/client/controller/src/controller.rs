@@ -16,7 +16,10 @@ use tiny_http::{Header, Request, Server};
 
 use crate::{
     engine::Engine,
-    policy::{generate, ordered_rules, parse_web, Action, Configuration, Ports, Profile, Rule},
+    policy::{
+        effective_rules, generate, parse_web, Action, Configuration, Ports, Profile, ProxyListen,
+        Rule,
+    },
     random_token, secure, windows_tun,
 };
 
@@ -46,9 +49,11 @@ struct Stored {
     previous_ack: u64,
     local: Vec<Rule>,
     queue: Vec<Rule>,
+    delete_queue: Vec<String>,
     profile: Profile,
     custom: Action,
     enabled: bool,
+    proxy_listen: ProxyListen,
 }
 
 pub fn updates_paused(directory: &Path) -> Result<bool, String> {
@@ -72,9 +77,11 @@ impl Default for Stored {
             previous_ack: 0,
             local: Vec::new(),
             queue: Vec::new(),
+            delete_queue: Vec::new(),
             profile: Profile::Auto,
             custom: Action::Proxy,
             enabled: true,
+            proxy_listen: ProxyListen::default(),
         }
     }
 }
@@ -149,14 +156,27 @@ pub fn serve(options: Options) -> Result<(), String> {
     access.push_str("Bearer ");
     access.push_str(&key);
     let state_path = options.directory.join("state.dpapi");
-    let state = match secure::load(&state_path) {
+    let mut state: Stored = match secure::load(&state_path) {
         Ok(data) => {
             serde_json::from_slice(&data).map_err(|_| "Сохранённая конфигурация повреждена")?
         }
         Err(e) if e.kind() == ErrorKind::NotFound => Stored::default(),
         Err(_) => return Err("Не удалось открыть сохранённую конфигурацию".into()),
     };
-    let base = options.proxy_port;
+    if state.proxy_listen.validate().is_err() {
+        state.proxy_listen = ProxyListen::default();
+    }
+    let base = if options.proxy_port != crate::PROXY_PORT {
+        state.proxy_listen.port = options.proxy_port;
+        options.proxy_port
+    } else {
+        state.proxy_listen.port
+    };
+    if options.port == base || (2..=4).any(|offset| options.port == base + offset) {
+        return Err("Порты прокси и управления пересекаются".into());
+    }
+    let mut listen = state.proxy_listen.clone();
+    listen.port = base;
     let mut reserved = [options.port, base, base + 2, base + 3, base + 4, 0];
     let probe = free_port(&reserved)?;
     reserved[5] = probe;
@@ -164,11 +184,12 @@ pub fn serve(options: Options) -> Result<(), String> {
         proxy: base,
         probe,
         control: free_port(&reserved)?,
+        listen,
     };
     let engine_token = random_token()?;
     let engine = Engine::new(
         options.binary.clone(),
-        Ports { ..ports },
+        ports.clone(),
         engine_token.clone(),
         options.tun,
         options.strict,
@@ -315,13 +336,16 @@ impl Controller {
     }
 
     fn apply(&mut self, state: &Stored, verify: bool) -> Result<(), String> {
+        let mut ports = self.ports.clone();
+        ports.listen = state.proxy_listen.clone();
+        ports.proxy = ports.listen.port;
         if let Some(remote) = state.remote.as_ref().filter(|_| state.enabled) {
             let mut generated = generate(
                 remote,
                 &state.local,
                 state.profile,
                 state.custom,
-                &self.ports,
+                &ports,
                 &self.engine_token,
             );
             if self.options.tun {
@@ -345,6 +369,7 @@ impl Controller {
         } else {
             self.engine.clear();
         }
+        self.ports = ports;
         Ok(())
     }
 
@@ -466,12 +491,13 @@ impl Controller {
         let response = request
             .send()
             .map_err(|_| "Сервер недоступен. Используется сохранённая конфигурация")?;
-        self.online = true;
+        self.online = matches!(response.status(), StatusCode::OK | StatusCode::NOT_MODIFIED);
         match response.status() {
             StatusCode::UNAUTHORIZED => {
                 self.engine.clear();
                 let next = Stored {
                     local: self.state.local.clone(),
+                    proxy_listen: self.state.proxy_listen.clone(),
                     ..Stored::default()
                 };
                 // If a disk write fails, keep the revoked credentials in memory
@@ -496,6 +522,17 @@ impl Controller {
                 }
                 for rule in &mut config.rules {
                     rule.normalize()?;
+                }
+                if config.groups.len() > 256 {
+                    return Err("Версия конфигурации несовместима".into());
+                }
+                for group in &mut config.groups {
+                    if group.entries.len() > 256 {
+                        return Err("Версия конфигурации несовместима".into());
+                    }
+                    for entry in &mut group.entries {
+                        entry.normalize()?;
+                    }
                 }
                 let verify = self.state.remote.as_ref().is_some_and(|old| {
                     let removed = old.proxies.iter().any(|known| {
@@ -558,6 +595,22 @@ impl Controller {
             self.state = next;
             self.sync_delay = Duration::from_secs(1);
         }
+        while let Some(rule_id) = self.state.delete_queue.first().cloned() {
+            let response = self
+                .http
+                .delete(Self::endpoint(&e, &format!("personal-rules/{rule_id}"))?)
+                .bearer_auth(&e.key)
+                .send()
+                .map_err(|_| "Удаление правила сохранено для отправки")?;
+            if !response.status().is_success() && response.status() != StatusCode::NOT_FOUND {
+                return Err("Сервер не принял удаление персонального правила".into());
+            }
+            let mut next = self.state.clone();
+            next.delete_queue.remove(0);
+            self.save(&next)?;
+            self.state = next;
+            self.sync_delay = Duration::from_secs(1);
+        }
         Ok(())
     }
 
@@ -575,11 +628,18 @@ impl Controller {
             "clientUpdatesPaused": remote.is_some_and(|r| r.client_updates_paused),
             "ack": self.state.previous_ack,
             "proxyPort": self.ports.proxy,
+            "proxyListen": {
+                "bind": self.state.proxy_listen.bind,
+                "port": self.ports.proxy,
+                "username": self.state.proxy_listen.username,
+                "hasPassword": !self.state.proxy_listen.password.is_empty(),
+            },
             "profile": self.state.profile,
             "custom": self.state.custom,
             "error": self.last_error,
             "rules": self.state.local,
             "remoteRules": remote.map(|r| &r.rules),
+            "remoteGroups": remote.map(|r| &r.groups),
             "pending": self.state.queue,
             "route": self.engine.status()
         })
@@ -597,6 +657,7 @@ impl Controller {
             "disconnect" => {
                 next = Stored {
                     local: next.local,
+                    proxy_listen: next.proxy_listen,
                     ..Stored::default()
                 };
                 self.commit(next, false)?;
@@ -611,6 +672,78 @@ impl Controller {
             }
             "enable" => {
                 next.enabled = data["enabled"].as_bool().ok_or("Укажите состояние")?;
+                self.commit(next, false)?;
+            }
+            "quick-mode" => {
+                match data["mode"].as_str().unwrap_or_default() {
+                    "off" => next.enabled = false,
+                    "rules" => {
+                        next.enabled = true;
+                        next.profile = Profile::DirectInternet;
+                    }
+                    "all" => {
+                        next.enabled = true;
+                        next.profile = Profile::Auto;
+                    }
+                    _ => return Err("Неверный быстрый режим".into()),
+                }
+                self.commit(next, false)?;
+            }
+            "proxy-settings" => {
+                let bind = data["bind"]
+                    .as_str()
+                    .unwrap_or(&next.proxy_listen.bind)
+                    .to_string();
+                let port = data["port"]
+                    .as_u64()
+                    .and_then(|v| u16::try_from(v).ok())
+                    .unwrap_or(next.proxy_listen.port);
+                let username = data["username"]
+                    .as_str()
+                    .unwrap_or(&next.proxy_listen.username)
+                    .to_string();
+                let keep_password = data["keepPassword"].as_bool().unwrap_or(false);
+                let password = match data["password"].as_str() {
+                    Some(pw) if !pw.is_empty() || !keep_password => pw.to_string(),
+                    _ => next.proxy_listen.password.clone(),
+                };
+                let mut listen = ProxyListen {
+                    bind,
+                    port,
+                    username,
+                    password,
+                };
+                listen.validate()?;
+                if listen.username.is_empty() {
+                    listen.password.clear();
+                }
+                let occupied = [self.options.port, self.ports.probe, self.ports.control];
+                if occupied.contains(&listen.port)
+                    || (2..=4).any(|off| occupied.contains(&(listen.port + off)))
+                {
+                    return Err("Выбранный порт пересекается со служебными портами агента".into());
+                }
+                next.proxy_listen = listen;
+                self.commit(next, false)?;
+            }
+            "delete-personal-rule" => {
+                let id = data["id"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .ok_or("Укажите идентификатор правила")?;
+                if next.enrollment.is_none() {
+                    return Err("Сначала подключите учётную запись".into());
+                }
+                if let Some(remote) = next.remote.as_mut() {
+                    remote
+                        .rules
+                        .retain(|r| r.id != id || r.locked || r.user_id.is_empty());
+                }
+                if !next.delete_queue.iter().any(|existing| existing == id) {
+                    next.delete_queue.push(id.to_string());
+                }
+                self.next_sync = Instant::now();
                 self.commit(next, false)?;
             }
             "profile" => {
@@ -679,7 +812,14 @@ impl Controller {
                     .as_ref()
                     .map(|cfg| cfg.rules.as_slice())
                     .unwrap_or(&[]);
-                let rule = ordered_rules(remote, &self.state.local)
+                let remote_groups = self
+                    .state
+                    .remote
+                    .as_ref()
+                    .map(|cfg| cfg.groups.as_slice())
+                    .unwrap_or(&[]);
+                let host_ip = host.parse::<std::net::IpAddr>().ok();
+                let rule = effective_rules(remote, remote_groups, &self.state.local)
                     .into_iter()
                     .find(|r| match r.kind.as_str() {
                         "process" => {
@@ -693,9 +833,10 @@ impl Controller {
                                     .strip_suffix(&r.pattern)
                                     .is_some_and(|prefix| prefix.ends_with('.'))
                         }
+                        "ip_cidr" => host_ip.is_some_and(|ip| cidr_contains(&r.pattern, ip)),
                         _ => false,
                     });
-                let mut action = rule.map(|r| r.action).unwrap_or(Action::Auto);
+                let mut action = rule.as_ref().map(|r| r.action).unwrap_or(Action::Auto);
                 if action == Action::Auto {
                     action = match self.state.profile {
                         Profile::DirectInternet => Action::LocalDirect,
@@ -704,6 +845,7 @@ impl Controller {
                     };
                 }
                 let scope = rule
+                    .as_ref()
                     .map(|r| {
                         if r.locked {
                             "LOCKED"
@@ -723,5 +865,36 @@ impl Controller {
             _ => return Err("Неизвестная команда".into()),
         }
         Ok(self.status())
+    }
+}
+
+fn cidr_contains(cidr: &str, ip: std::net::IpAddr) -> bool {
+    let Some((net_str, prefix_str)) = cidr.split_once('/') else {
+        return false;
+    };
+    let (Ok(net_ip), Ok(prefix)) = (
+        net_str.parse::<std::net::IpAddr>(),
+        prefix_str.parse::<u32>(),
+    ) else {
+        return false;
+    };
+    match (net_ip, ip) {
+        (std::net::IpAddr::V4(a), std::net::IpAddr::V4(b)) if prefix <= 32 => {
+            let mask = if prefix == 0 {
+                0
+            } else {
+                !0u32 << (32 - prefix)
+            };
+            (u32::from(a) & mask) == (u32::from(b) & mask)
+        }
+        (std::net::IpAddr::V6(a), std::net::IpAddr::V6(b)) if prefix <= 128 => {
+            let mask = if prefix == 0 {
+                0
+            } else {
+                !0u128 << (128 - prefix)
+            };
+            (u128::from(a) & mask) == (u128::from(b) & mask)
+        }
+        _ => false,
     }
 }

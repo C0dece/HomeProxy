@@ -21,6 +21,22 @@ import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 
 class HomeProxyVpnService : VpnService(), CommandServerHandler {
+    companion object {
+        const val ACTION_MODE_OFF = "app.homeproxy.agent.MODE_OFF"
+        const val ACTION_MODE_RULES = "app.homeproxy.agent.MODE_RULES"
+        const val ACTION_MODE_ALL = "app.homeproxy.agent.MODE_ALL"
+        private const val MAX_RECENT_DOMAINS = 120
+        private val ipLike = Regex("^[0-9.:\\[\\]]+$")
+    }
+
+    private data class RecentDomain(
+        val domain: String,
+        var rule: String,
+        var chain: String,
+        var lastSeen: Long,
+        var count: Int
+    )
+
     private val platform by lazy { VpnPlatform(this) }
     private var core: CommandServer? = null
     private var ticker: ScheduledFuture<*>? = null
@@ -33,6 +49,7 @@ class HomeProxyVpnService : VpnService(), CommandServerHandler {
     private var selected: String? = null
     private var serverDirect = false
     private val health = mutableMapOf<String, Int>()
+    private val recentDomains = LinkedHashMap<String, RecentDomain>()
     private val probes = Executors.newFixedThreadPool(4)
     internal var connected = false
         private set
@@ -42,27 +59,65 @@ class HomeProxyVpnService : VpnService(), CommandServerHandler {
             stopSelf(startId)
             return START_NOT_STICKY
         }
+        val action = intent?.action
+        if (action == ACTION_MODE_OFF && !isAlwaysOn) {
+            MobileRuntime.worker.execute {
+                try {
+                    MobileRuntime.applyQuickMode(this, "off")
+                } catch (_: Exception) {
+                }
+            }
+            return START_NOT_STICKY
+        }
         showNotification()
         if (!started) {
             started = true
-            MobileRuntime.worker.execute { MobileRuntime.started(this) }
+            MobileRuntime.worker.execute {
+                MobileRuntime.started(this)
+                if (action == ACTION_MODE_RULES) MobileRuntime.applyQuickModeSafe(this, "rules")
+                else if (action == ACTION_MODE_ALL) MobileRuntime.applyQuickModeSafe(this, "all")
+            }
             ticker = MobileRuntime.worker.scheduleWithFixedDelay({ MobileRuntime.tick(this) }, 6, 6, TimeUnit.SECONDS)
+        } else if (action == ACTION_MODE_RULES) {
+            MobileRuntime.worker.execute { MobileRuntime.applyQuickModeSafe(this, "rules") }
+        } else if (action == ACTION_MODE_ALL) {
+            MobileRuntime.worker.execute { MobileRuntime.applyQuickModeSafe(this, "all") }
         }
         return if (isAlwaysOn) START_STICKY else START_NOT_STICKY
     }
 
-    private fun showNotification() {
+    private fun actionIntent(action: String, requestCode: Int, title: String): Notification.Action {
+        val intent = Intent(this, HomeProxyVpnService::class.java).setAction(action)
+        val pending = PendingIntent.getForegroundService(
+            this,
+            requestCode,
+            intent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        return Notification.Action.Builder(null, title, pending).build()
+    }
+
+    internal fun showNotification() {
         val notifications = getSystemService(NotificationManager::class.java)
-        notifications.createNotificationChannel(NotificationChannel("homeproxy.vpn", "HomeProxy VPN", NotificationManager.IMPORTANCE_LOW))
+        notifications.createNotificationChannel(
+            NotificationChannel("homeproxy.vpn", "HomeProxy VPN", NotificationManager.IMPORTANCE_LOW)
+        )
         val launch = packageManager.getLaunchIntentForPackage(packageName)
         val pending = launch?.let { PendingIntent.getActivity(this, 0, it, PendingIntent.FLAG_IMMUTABLE) }
-        startForeground(410, Notification.Builder(this, "homeproxy.vpn")
+        val mode = MobileRuntime.currentModeLabel(this)
+        val builder = Notification.Builder(this, "homeproxy.vpn")
             .setSmallIcon(android.R.drawable.ic_lock_lock)
-            .setContentTitle("HomeProxy VPN")
-            .setContentText("Маршрутизация через HomeProxy")
+            .setContentTitle("HomeProxy VPN · $mode")
+            .setContentText(if (connected) "Туннель активен" else "Подготовка подключения")
             .setContentIntent(pending)
             .setOngoing(true)
-            .build())
+            .addAction(actionIntent(ACTION_MODE_RULES, 411, "Авто"))
+            .addAction(actionIntent(ACTION_MODE_ALL, 412, "Весь трафик"))
+        if (!isAlwaysOn) {
+            builder.addAction(actionIntent(ACTION_MODE_OFF, 413, "Выкл"))
+        }
+        startForeground(410, builder.build())
+        HomeProxyTileService.requestUpdate(this)
     }
 
     internal fun apply(state: JSONObject) {
@@ -77,6 +132,7 @@ class HomeProxyVpnService : VpnService(), CommandServerHandler {
         selected = null
         connected = true
         probe()
+        showNotification()
     }
 
     private fun createCore(): CommandServer {
@@ -115,14 +171,69 @@ class HomeProxyVpnService : VpnService(), CommandServerHandler {
         }
     }
 
+    internal fun pollConnections() {
+        if (!connected) return
+        val connections = MobileRuntime.fetchConnections(controlPort, secret)
+        val now = System.currentTimeMillis() / 1000L
+        synchronized(recentDomains) {
+            for (index in 0 until connections.length()) {
+                val conn = connections.optJSONObject(index) ?: continue
+                val meta = conn.optJSONObject("metadata") ?: continue
+                val host = meta.optString("host").trim().lowercase().trimEnd('.')
+                if (host.isEmpty() || !host.contains('.') || ipLike.matches(host)) continue
+                val rule = conn.optString("rule")
+                val chains = conn.optJSONArray("chains")
+                val chain = if (chains != null && chains.length() > 0) chains.optString(0) else ""
+                val existing = recentDomains.remove(host)
+                if (existing != null) {
+                    existing.rule = rule
+                    existing.chain = chain
+                    existing.lastSeen = now
+                    existing.count += 1
+                    recentDomains[host] = existing
+                } else {
+                    if (recentDomains.size >= MAX_RECENT_DOMAINS) {
+                        val oldest = recentDomains.keys.firstOrNull()
+                        if (oldest != null) recentDomains.remove(oldest)
+                    }
+                    recentDomains[host] = RecentDomain(host, rule, chain, now, 1)
+                }
+            }
+        }
+    }
+
+    internal fun recentDomainsJson(): JSONArray {
+        val list = synchronized(recentDomains) {
+            recentDomains.values.toList().asReversed()
+        }
+        val out = JSONArray()
+        for (item in list) {
+            out.put(
+                JSONObject()
+                    .put("domain", item.domain)
+                    .put("rule", item.rule)
+                    .put("chain", item.chain)
+                    .put("lastSeen", item.lastSeen)
+                    .put("count", item.count)
+            )
+        }
+        return out
+    }
+
+    internal fun clearRecentDomains() {
+        synchronized(recentDomains) { recentDomains.clear() }
+    }
+
     internal fun routeStatus(): JSONObject {
         val list = JSONArray()
         for (index in 0 until candidates.length()) {
             val entry = JSONObject(candidates.getJSONObject(index).toString())
             list.put(entry.put("available", (health[entry.getString("tag")] ?: 0) > 0))
         }
+        val primary = if (candidates.length() > 0) candidates.getJSONObject(0).getString("tag") else null
+        val isFallback = selected != null && primary != null && selected != primary
         return JSONObject().put("selected", selected ?: JSONObject.NULL).put("candidates", list)
-            .put("fallback", selected?.startsWith("backup-") == true).put("serverDirectAvailable", serverDirect)
+            .put("fallback", isFallback).put("serverDirectAvailable", serverDirect)
     }
 
     internal fun close() {
@@ -138,6 +249,7 @@ class HomeProxyVpnService : VpnService(), CommandServerHandler {
             try { service.close() } catch (_: Exception) { }
         }
         try { platform.close() } catch (_: Exception) { }
+        HomeProxyTileService.requestUpdate(this)
     }
 
     override fun onDestroy() {

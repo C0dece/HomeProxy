@@ -17,6 +17,10 @@ import org.json.JSONObject
 import java.io.File
 import java.io.FileNotFoundException
 import java.io.InputStream
+import java.net.ConnectException
+import java.net.NoRouteToHostException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.security.MessageDigest
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -24,8 +28,11 @@ import java.util.concurrent.TimeUnit
 internal object AndroidUpdates {
     private const val RESULT = "app.homeproxy.agent.UPDATE_RESULT"
     private const val MAX_APK = 1L shl 30
+    private class RateLimitException : Exception()
     val worker = Executors.newSingleThreadExecutor()
     private val client = OkHttpClient.Builder().followRedirects(false).followSslRedirects(false)
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
         .callTimeout(3, TimeUnit.MINUTES).build()
     private val channels = setOf("dev", "beta", "stable")
     private val versionFormat = Regex("v?(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)")
@@ -78,8 +85,27 @@ internal object AndroidUpdates {
         notice = null
         if (channel !in channels) throw MobileFailure("Неизвестный канал обновлений")
         val source = source(context) ?: throw MobileFailure("Источник обновлений не задан в сборке")
-        val manifest = request(context, source.getString("manifest")) { it.readBounded(262_144) }
-        val sig = request(context, source.getString("signature")) { it.readBounded(512) }
+        val manifest: ByteArray
+        val sig: ByteArray
+        try {
+            manifest = request(context, source.getString("manifest")) { it.readBounded(262_144) }
+            sig = request(context, source.getString("signature")) { it.readBounded(512) }
+        } catch (_: RateLimitException) {
+            notice = "Превышен лимит запросов GitHub API. Попробуйте позже."
+            return status(context)
+        } catch (_: SocketTimeoutException) {
+            notice = "Превышено время ожидания ответа от GitHub."
+            return status(context)
+        } catch (_: UnknownHostException) {
+            notice = "Нет подключения к сети. Проверьте интернет."
+            return status(context)
+        } catch (_: ConnectException) {
+            notice = "Нет подключения к сети или сервер обновлений недоступен."
+            return status(context)
+        } catch (_: NoRouteToHostException) {
+            notice = "Нет подключения к сети. Проверьте интернет."
+            return status(context)
+        }
         System.loadLibrary("homeproxy_desktop_lib")
         val key = decode(source.getString("key").trim().removeSurrounding("-----BEGIN PUBLIC KEY-----", "-----END PUBLIC KEY-----"))
         if (!verify(key, manifest, decode(sig.toString(Charsets.US_ASCII)))) {
@@ -144,12 +170,16 @@ internal object AndroidUpdates {
     private fun <T> request(context: Context, address: String, read: (InputStream) -> T): T {
         var next = url(context, address)
         repeat(6) {
-            client.newCall(Request.Builder().url(next).build()).execute().use { response ->
+            val req = Request.Builder().url(next).header("User-Agent", "HomeProxy-Android").build()
+            client.newCall(req).execute().use { response ->
                 if (response.isRedirect) {
                     val location = response.header("Location")?.let(next::resolve)
                         ?: throw MobileFailure("Некорректный адрес перенаправления")
                     next = url(context, location.toString())
                 } else {
+                    if (response.code == 429 || (response.code == 403 && response.header("X-RateLimit-Remaining") == "0")) {
+                        throw RateLimitException()
+                    }
                     if (!response.isSuccessful) throw MobileFailure("Источник обновлений недоступен")
                     return response.body?.byteStream()?.use(read) ?: throw MobileFailure("Пустой ответ источника")
                 }

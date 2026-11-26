@@ -1,6 +1,6 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [string]$InstallDir = $PSScriptRoot,
+    [string]$InstallDir = '',
     [string]$ConfigFile = 'server.json',
     [string]$ServiceName = 'HomeProxyServer',
     [System.Management.Automation.PSCredential]$Credential,
@@ -70,6 +70,10 @@ if ($Uninstall) {
         Remove-HomeProxyFirewallRules
     }
     return
+}
+
+if ([string]::IsNullOrWhiteSpace($InstallDir)) {
+    $InstallDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 }
 
 $resolvedDir = (Resolve-Path -LiteralPath $InstallDir).Path

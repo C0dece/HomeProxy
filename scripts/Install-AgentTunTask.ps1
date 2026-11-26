@@ -1,7 +1,7 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [string]$AgentExe = (Join-Path $PSScriptRoot 'homeproxy-agent.exe'),
-    [string]$DataDir = $(if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'HomeProxy' } else { '' }),
+    [string]$AgentExe = '',
+    [string]$DataDir = '',
     [string]$TaskName = 'HomeProxyAgentTun',
     [switch]$Uninstall
 )
@@ -14,6 +14,14 @@ if ($Uninstall) {
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
     }
     return
+}
+
+$scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+if ([string]::IsNullOrWhiteSpace($AgentExe)) {
+    $AgentExe = Join-Path $scriptDir 'homeproxy-agent.exe'
+}
+if ([string]::IsNullOrWhiteSpace($DataDir) -and $env:LOCALAPPDATA) {
+    $DataDir = Join-Path $env:LOCALAPPDATA 'HomeProxy'
 }
 
 if (!(Test-Path -LiteralPath $AgentExe -PathType Leaf)) {

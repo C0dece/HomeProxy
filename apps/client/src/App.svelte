@@ -26,7 +26,7 @@
   let data = $state<Status>()
   let android = $derived(data?.platform === 'android')
   let appKind = $derived(android ? 'package' : 'process')
-  let tab = $state<'connection' | 'rules' | 'apps' | 'diagnostics' | 'updates'>('connection')
+  let tab = $state<'connection' | 'rules' | 'apps' | 'exclusions' | 'diagnostics' | 'updates'>('connection')
   let error = $state('')
   let busy = $state(false)
   let link = $state('')
@@ -42,6 +42,8 @@
   let appIdentifier = $state<HTMLInputElement>()
   let appAction = $state<Action>('PROXY')
   let appScope = $state<'LOCAL' | 'PERSONAL'>('LOCAL')
+  let exclusionSearch = $state('')
+  let exclusionPackage = $state('')
   let explanation = $state<{ action: Action; scope: string; rule: Rule | null }>()
   let testHost = $state('')
   let update = $state<Update>()
@@ -51,6 +53,9 @@
   let syncedApps = $derived((data?.remoteRules ?? []).filter(rule => rule.kind === appKind))
   let localApps = $derived((data?.rules ?? []).filter(rule => rule.kind === appKind))
   let excludedApps = $derived(data?.excludedApps ?? [])
+  let availableExclusions = $derived(apps.filter(app => !excludedApps.includes(app.path) &&
+    (app.name + ' ' + app.path).toLowerCase().includes(exclusionSearch.trim().toLowerCase())))
+  let canExclude = $derived(!busy && !!data?.revision && !!data?.exclusionsAllowed)
   const siteRule = (rule: Rule) => rule.kind === 'domain' || rule.kind === 'suffix'
   const profileDetails: Record<Profile, string> = {
     AUTO: 'Сначала через сервер HomeProxy. При сбое Agent подключается к прокси провайдера с этого устройства.',
@@ -145,11 +150,13 @@
     if (pending) appScope = 'PERSONAL'
     appIdentifier?.focus()
   }
-  function excludePackage() {
-    const name = appPattern.trim()
-    if (name && window.confirm('Исключить ' + name + ' из VPN? Приложение сможет выходить в сеть напрямую. При lockdown Android заблокирует этот трафик.')) {
-      void run('vpn-exclusion', { package: name, excluded: true })
-    }
+  function updateExclusion(event: SubmitEvent) {
+    event.preventDefault()
+    const name = exclusionPackage.trim()
+    if (!canExclude || !name || excludedApps.includes(name)) return
+    void run('vpn-exclusion', { package: name, excluded: true }).then(() => {
+      if (excludedApps.includes(name)) exclusionPackage = ''
+    })
   }
   function showUpdates() {
     tab = 'updates'
@@ -237,6 +244,9 @@
       <button class:current={tab === 'connection'} onclick={() => tab = 'connection'}><Route size={16} /> Подключение</button>
       <button class:current={tab === 'rules'} onclick={() => tab = 'rules'}><Globe2 size={16} /> Сайты</button>
       <button class:current={tab === 'apps'} onclick={() => { tab = 'apps'; void run('list-apps') }}><Monitor size={16} /> Приложения</button>
+      {#if android}
+        <button class:current={tab === 'exclusions'} onclick={() => { tab = 'exclusions'; void run('list-apps') }}><Shield size={16} /> Исключения</button>
+      {/if}
       <button class:current={tab === 'diagnostics'} onclick={() => tab = 'diagnostics'}><Signal size={16} /> Диагностика</button>
       <button disabled={busy || data.tun} onclick={showUpdates}><Download size={16} /> Обновления</button>
     </nav>
@@ -329,9 +339,7 @@
                 <span class="card-head">
                   <strong>{item.name}</strong>
                   <small class="muted mono app-path" title={item.path}>{item.path}</small>
-                  {#if data.exclusionsAllowed && excludedApps.includes(item.path)}
-                    <small class="muted">{data.lockdown ? 'Вне VPN · Android блокирует' : 'Вне VPN на этом устройстве'}</small>
-                  {:else if rule}
+                  {#if rule}
                     <small class="muted">{scopeLabel(rule)} · {actionNames[rule.action]}</small>
                   {/if}
                 </span>
@@ -371,25 +379,54 @@
             </div></div>
         {/each}
       </section>
-      {#if android}
-        <section class="card stack" aria-label="Исключения из VPN">
-          <h2>Исключения из VPN</h2>
-          {#if !data.exclusionsAllowed}
-            <p class="muted">Обязательные правила приостанавливают исключения.</p>
-          {:else if data.lockdown}
-            <p class="muted">Android блокирует трафик исключённых приложений.</p>
-          {/if}
-          {#each excludedApps as name (name)}
-            <div class="between item">
-              <span class="mono">{name}</span>
-              <button class="small" disabled={busy} aria-label={'Вернуть в VPN ' + name}
-                onclick={() => run('vpn-exclusion', { package: name, excluded: false })}>Вернуть в VPN</button>
+    {:else if android && tab === 'exclusions'}
+      <section class="card stack" aria-label="Исключения из VPN">
+        <h2>Приложения вне VPN</h2>
+        {#if !data.revision}
+          <p class="notice">Дождитесь получения настроек сервера.</p>
+        {:else if !data.exclusionsAllowed}
+          <p class="notice warning">Обязательные правила приостанавливают исключения.</p>
+        {:else if data.lockdown}
+          <p class="notice warning">Android блокирует сеть для исключённых приложений. Прямой доступ требует отключить «Блокировать подключения без VPN» в настройках Android.</p>
+        {:else}
+          <p class="label">Приложения из этого списка выходят в интернет напрямую с телефона.</p>
+        {/if}
+        {#each excludedApps as name (name)}
+          {@const app = apps.find(item => item.path === name)}
+          <div class="between item exclusion-row">
+            <span class="card-head"><strong>{app?.name ?? name}</strong>
+              {#if app}<small class="muted mono">{name}</small>{/if}
+            </span>
+            <button class="small" disabled={busy} aria-label={'Вернуть в VPN ' + (app?.name ?? name)} data-package={name}
+              onclick={() => run('vpn-exclusion', { package: name, excluded: false })}>Вернуть в VPN</button>
+          </div>
+        {:else}
+          <p class="muted">Список исключений пуст.</p>
+        {/each}
+      </section>
+      <section class="card stack" aria-label="Добавить исключение">
+        <h2>Добавить приложение</h2>
+        <label>Поиск по названию или пакету<input type="search" bind:value={exclusionSearch} /></label>
+        <div class="application-list">
+          {#each availableExclusions as item (item.path)}
+            <div class="exclusion-row exclusion-choice">
+              {#if item.icon}<img src={item.icon} alt="" width="28" height="28" />{/if}
+              <span class="card-head"><strong>{item.name}</strong><small class="muted mono app-path" title={item.path}>{item.path}</small></span>
+              <button class="small" disabled={!canExclude} aria-label={'Исключить ' + item.name} data-package={item.path}
+                onclick={() => run('vpn-exclusion', { package: item.path, excluded: true })}>Исключить</button>
             </div>
+          {:else}
+            <p class="muted">{busy ? 'Загрузка приложений…' : 'Приложения не найдены.'}</p>
           {/each}
-          <button disabled={busy || !data.revision || !data.exclusionsAllowed || !appPattern.trim() || excludedApps.includes(appPattern.trim())}
-            onclick={excludePackage}>Исключить выбранное приложение</button>
-        </section>
-      {/if}
+        </div>
+        <details>
+          <summary>Добавить по имени пакета</summary>
+          <form class="stack" onsubmit={updateExclusion}>
+            <label>Имя пакета<input required maxlength="255" placeholder="com.example.app" bind:value={exclusionPackage} autocapitalize="none" /></label>
+            <button disabled={!canExclude || !exclusionPackage.trim() || excludedApps.includes(exclusionPackage.trim())}>Добавить в исключения</button>
+          </form>
+        </details>
+      </section>
     {:else}
       <section class="card stack">
         <div class="between"><h2>Доступность маршрутов</h2><button class="small" disabled={busy} onclick={() => run('probe')}><RefreshCw size={15} /> Проверить</button></div>
@@ -428,6 +465,12 @@
   .app-choice img { flex: none; }
   .app-choice .card-head { min-width: 0; overflow-wrap: anywhere; }
   .app-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .exclusion-row .card-head { min-width: 0; overflow-wrap: anywhere; }
+  .exclusion-choice { display: flex; align-items: center; gap: 8px; padding-block: 6px; }
+  .exclusion-choice > img, .exclusion-choice > button { flex: none; }
+  .exclusion-choice .card-head { flex: 1; }
+  details[open] form { margin-top: 12px; }
+  summary { cursor: pointer; font-size: .86rem; color: var(--secondary); }
   @media (max-width: 420px) {
     .mobile-nav { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .mobile-nav button { padding-inline: 6px; }

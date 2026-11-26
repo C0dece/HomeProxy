@@ -420,7 +420,9 @@ def test(args, root):
         assert all(value in row for value in ("HomeProxy QA HTTP", PROBE_APP, "Для всех пользователей", "Блокировать"))
 
         exclusion = {"package": PROBE_APP, "excluded": True}
-        assert ctl("vpn-exclusion", exclusion)["excludedApps"] == [PROBE_APP]
+        loopback.eventual(lambda: ctl("ui-exclusions"), "Separate Android exclusions tab")
+        loopback.eventual(lambda: ctl("ui-exclusion-change", exclusion), "Add an Android exclusion through search")
+        loopback.eventual(lambda: ctl("status")["excludedApps"] == [PROBE_APP], "Saved Android exclusion")
         before = len(provider.connects)
         assert network(PROBE_APP), "Excluded UID did not reach the origin"
         assert provider_target not in provider.connects[before:]
@@ -433,12 +435,15 @@ def test(args, root):
         status = ctl("sync")
         assert not status["exclusionsAllowed"] and status["excludedApps"] == [PROBE_APP]
         assert not network(PROBE_APP), "An exclusion bypassed the mandatory policy guard"
-        assert ctl("vpn-exclusion", {**exclusion, "excluded": False})["excludedApps"] == []
+        loopback.eventual(lambda: ctl("ui-exclusion-change", {**exclusion, "excluded": False}), "Remove Android exclusion")
+        loopback.eventual(lambda: ctl("status")["excludedApps"] == [], "Removed Android exclusion")
         change("DELETE", "rules/" + mandatory["id"], None, 204)
         assert ctl("sync")["exclusionsAllowed"]
         print("PASS Android per-UID VPN exclusion and mandatory-policy suspension", flush=True)
 
         package = {"package": PROBE_APP, "scope": "LOCAL", "action": "LOCAL_DIRECT"}
+        assert ctl("ui-apps")
+        loopback.eventual(lambda: ctl("ui-package", {"package": PROBE_APP}), "Android package picker")
         loopback.eventual(lambda: ctl("ui-package-save", package), "Android LOCAL package form")
         loopback.eventual(lambda: any(rule["pattern"] == PROBE_APP and rule["action"] == "LOCAL_DIRECT"
                                       for rule in ctl("status")["rules"]), "Android LOCAL package rule")

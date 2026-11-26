@@ -60,9 +60,26 @@ function invoke({ command, data }) {
   }
   if (command === 'ui-exclusions') {
     const section = document.querySelector('[aria-label="Исключения из VPN"]')
-    if (!section) return ''
+    if (!section) {
+      const tab = [...document.querySelectorAll('nav button')].find(item => item.textContent.trim() === 'Исключения')
+      tab?.click()
+      return ''
+    }
     section.scrollIntoView({ block: 'center' })
     return section.innerText
+  }
+  if (command === 'ui-exclusion-change') {
+    const list = document.querySelector(data.excluded ? '[aria-label="Добавить исключение"]' : '[aria-label="Исключения из VPN"]')
+    const field = list?.querySelector('input[type=search]')
+    if (field && field.value !== data.package) {
+      field.value = data.package
+      field.dispatchEvent(new Event('input', { bubbles: true }))
+      return false
+    }
+    const button = [...(list?.querySelectorAll('button[data-package]') ?? [])].find(item => item.dataset.package === data.package)
+    if (!button || button.disabled) return false
+    button.click()
+    return true
   }
   if (command === 'ui-package-save') {
     const field = document.querySelector('input[placeholder="com.example.app"]')

@@ -37,7 +37,7 @@ function Get-Artifact([string]$File, [string]$Component, [string]$Platform, [str
     return @{
         component = $Component; channel = 'stable'; version = $Version; platform = $Platform; arch = $Arch
         url = "$assets/$File"; size = $item.Length; sha256 = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-        apiMin = 1; apiMax = 1; dbSchema = 2; notes = $notes
+        apiMin = 1; apiMax = 1; dbSchema = 3; notes = $notes
     }
 }
 
@@ -88,4 +88,4 @@ node scripts/pack-browser.mjs $browserZip $BrowserPrivateKey (Join-Path $out 'ho
 $serverZip = Join-Path $out 'homeproxy-server-windows-amd64.zip'
 Compress-Archive -LiteralPath @((Join-Path $windows 'homeproxy-server.exe'), (Join-Path $windows 'sing-box.exe'), `
     (Join-Path $windows 'sing-box-license.txt'), (Join-Path $windows 'admin'), (Join-Path $out 'homeproxy-verify-release.exe'), `
-    (Join-Path $out 'release-public.pem'), 'docs/server.example.json', 'scripts/Update-ServerFromGitHub.ps1') -DestinationPath $serverZip
+    (Join-Path $out 'release-public.pem'), 'docs/server.example.json', 'scripts/Update-ServerFromGitHub.ps1', 'scripts/Install-ServerService.ps1') -DestinationPath $serverZip

@@ -562,7 +562,7 @@
         {:else if onboardingStep === 'sub'}
           <form class="hp-card stack" onsubmit={e => { e.preventDefault(); void run('connect', { link }) }}>
             <span class="field-title">Вставьте ссылку подписки</span>
-            <input type="password" class="mono" bind:value={link} required autocomplete="off" placeholder="https://…/connect#…" />
+            <input type="password" class="mono" bind:value={link} required autocomplete="off" placeholder="Ссылка HomeProxy или sing-box" />
             <div class="flex">
               <button type="button" onclick={() => onboardingStep = 'choose'}>Назад</button>
               <button class="primary flex-1" disabled={busy || !link}>{busy ? 'Подключение…' : 'Подключить'}</button>
@@ -902,7 +902,7 @@
                                 <div class="entry-item between">
                                   <div class="flex entry-left">
                                     <span class="type-chip mono">{entryBadge(entry.kind)}</span>
-                                    <span class="mono entry-val" class:disabled={!enabled}>{entry.pattern}</span>
+                                    <span class="mono entry-val" class:disabled={!enabled} title={entry.pattern}>{entry.pattern}</span>
                                   </div>
                                   <div class="flex">
                                     <button
@@ -951,7 +951,7 @@
                     {@const activeRule = rule.enabled !== false}
                     <div class="res-header between">
                       <div class="card-head">
-                        <span class="mono rule-pat" class:disabled={!activeRule}>{rule.pattern}</span>
+                        <span class="mono rule-pat" class:disabled={!activeRule} title={rule.pattern}>{rule.pattern}</span>
                         <span class="route-pill {routePillClass(rule.action)}">{routeLabel(rule.action)}</span>
                       </div>
                       <div class="flex">
@@ -1043,7 +1043,7 @@
                                   <div class="entry-item between">
                                     <div class="flex entry-left">
                                       <span class="type-chip mono">{entryBadge(entry.kind)}</span>
-                                      <span class="mono entry-val" class:disabled={!enabled}>{entry.pattern}</span>
+                                      <span class="mono entry-val" class:disabled={!enabled} title={entry.pattern}>{entry.pattern}</span>
                                     </div>
                                     {#if !locked}
                                       <div class="flex">
@@ -1097,7 +1097,7 @@
                       {@const activeRule = rule.enabled !== false}
                       <div class="res-header between">
                         <div class="card-head">
-                          <span class="mono rule-pat" class:disabled={!activeRule}>{rule.pattern}</span>
+                          <span class="mono rule-pat" class:disabled={!activeRule} title={rule.pattern}>{rule.pattern}</span>
                           <span class="route-pill {routePillClass(rule.action)}">{routeLabel(rule.action)}</span>
                         </div>
                         {#if editable}
@@ -1125,7 +1125,6 @@
           <section class="hp-card stack">
             <div class="between">
               <span class="section-title">Источник подключения</span>
-              <button type="button" class="link-btn" onclick={() => { showOnboarding = true; onboardingStep = 'choose' }}>Экран 1-го входа</button>
             </div>
             <div class="hp-segmented two-cols">
               <button
@@ -1647,8 +1646,9 @@
     background: rgba(18, 18, 21, 0.72);
   }
   .entry-item { padding: 8px 10px; font-size: .76rem; }
-  .entry-left { min-width: 0; flex: 1; }
+  .entry-left { min-width: 0; flex: 1; flex-wrap: nowrap; }
   .type-chip {
+    flex: none;
     font-size: .6rem;
     text-transform: uppercase;
     padding: 2px 6px;
@@ -1656,7 +1656,15 @@
     background: rgba(255, 255, 255, 0.06);
     color: #A1A1AA;
   }
-  .entry-val, .rule-pat { font-size: .74rem; color: #E4E4E7; }
+  .entry-val, .rule-pat {
+    font-size: .74rem;
+    color: #E4E4E7;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: block;
+  }
   .entry-val.disabled, .rule-pat.disabled { color: #71717A; text-decoration: line-through; }
   .inline-toggle {
     min-height: 22px;
@@ -1678,16 +1686,6 @@
   .settings-panel { gap: 14px; }
   .sub-box { gap: 10px; padding-top: 4px; }
   .row-sm { font-size: .78rem; }
-  .link-btn {
-    min-height: 0;
-    padding: 0;
-    border: 0;
-    background: transparent;
-    color: #A1A1AA;
-    font-size: .74rem;
-    text-decoration: underline;
-  }
-  .link-btn:hover:not(:disabled) { color: #FFFFFF; background: transparent; }
   .proto-row { display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 8px; }
   .pass-wrap { position: relative; }
   .pass-wrap input { padding-right: 36px; }

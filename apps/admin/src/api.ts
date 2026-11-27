@@ -31,6 +31,16 @@ export type UpdateEntry = {
   version?: string
   exitCode?: number
 }
+export type ServerUpdateCheck = {
+  current: string
+  dbSchema?: number
+  latest?: string
+  available: boolean
+  canApply: boolean
+  notes?: string
+  releaseUrl?: string
+  reason?: string
+}
 export type State = {
   revision: number
   users: User[]
@@ -45,6 +55,10 @@ export type State = {
 const errors: Record<string, string> = {
   update_policy_disabled: 'Управление автообновлением на сервере отключено.',
   update_policy_unavailable: 'Не удалось сохранить политику обновлений.',
+  server_update_unavailable: 'Обновление из панели недоступно: рядом с сервером нет homeproxy-verify-release.exe или release-public.pem.',
+  update_check_failed: 'Не удалось проверить релиз на GitHub.',
+  no_update_available: 'На сервере уже установлена актуальная совместимая версия.',
+  update_launch_failed: 'Не удалось запустить процесс обновления сервера.',
   unauthorized: 'Проверьте ключ администратора.',
   name_taken: 'Это имя уже используется.',
   proxy_unreachable: 'Контрольный запрос через прокси не прошёл. Проверьте адрес, учётные данные и заголовки.',

@@ -457,23 +457,7 @@ impl Controller {
     }
 
     fn parse_link(&self, value: &str) -> Result<(Url, String), String> {
-        let mut url = parse_web(value, self.options.allow_loopback_http)?;
-        let token = url
-            .fragment()
-            .ok_or("В ссылке отсутствует ключ подключения")?
-            .to_string();
-        if url.path() != "/connect"
-            || url.query().is_some()
-            || token.len() != 43
-            || !token
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-        {
-            return Err("Неверная персональная ссылка".into());
-        }
-        url.set_fragment(None);
-        url.set_path("/");
-        Ok((url, token))
+        parse_connect_link(value, self.options.allow_loopback_http, false)
     }
 
     fn endpoint(e: &Enrollment, endpoint: &str) -> Result<Url, String> {
@@ -1175,5 +1159,95 @@ fn cidr_contains(cidr: &str, ip: std::net::IpAddr) -> bool {
             (u128::from(a) & mask) == (u128::from(b) & mask)
         }
         _ => false,
+    }
+}
+
+fn valid_connect_token(token: &str) -> bool {
+    token.len() == 43
+        && token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+fn parse_connect_link(
+    value: &str,
+    allow_loopback_http: bool,
+    nested: bool,
+) -> Result<(Url, String), String> {
+    let trimmed = value.trim();
+    if !nested {
+        if let Ok(parsed) = Url::parse(trimmed) {
+            if parsed.scheme().eq_ignore_ascii_case("sing-box")
+                && parsed.host_str() == Some("import-remote-profile")
+            {
+                let inner = parsed
+                    .query_pairs()
+                    .find(|(k, _)| k == "url")
+                    .map(|(_, v)| v.into_owned())
+                    .ok_or("В ссылке sing-box отсутствует параметр url")?;
+                return parse_connect_link(&inner, allow_loopback_http, true);
+            }
+        }
+    }
+
+    let mut url = parse_web(trimmed, allow_loopback_http)?;
+    let token = if url.path() == "/connect" {
+        if url.query().is_some() {
+            return Err("Неверная персональная ссылка".into());
+        }
+        url.fragment()
+            .ok_or("В ссылке отсутствует ключ подключения")?
+            .to_string()
+    } else if url.path() == "/api/sub/singbox" {
+        url.query_pairs()
+            .find(|(k, _)| k == "token")
+            .map(|(_, v)| v.into_owned())
+            .ok_or("В ссылке отсутствует ключ подключения")?
+    } else {
+        return Err("Неверная персональная ссылка".into());
+    };
+
+    if !valid_connect_token(&token) {
+        return Err("Неверная персональная ссылка".into());
+    }
+    url.set_query(None);
+    url.set_fragment(None);
+    url.set_path("/");
+    Ok((url, token))
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::parse_connect_link;
+
+    const SAMPLE_TOKEN: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklm0123";
+
+    #[test]
+    fn parses_native_singbox_sub_and_deep_links() {
+        let native = format!("https://hp.example.com/connect#{SAMPLE_TOKEN}");
+        let (u1, t1) = parse_connect_link(&native, false, false).unwrap();
+        assert_eq!(u1.as_str(), "https://hp.example.com/");
+        assert_eq!(t1, SAMPLE_TOKEN);
+
+        let sub =
+            format!("https://hp.example.com/api/sub/singbox?final=proxy&token={SAMPLE_TOKEN}");
+        let (u2, t2) = parse_connect_link(&sub, false, false).unwrap();
+        assert_eq!(u2.as_str(), "https://hp.example.com/");
+        assert_eq!(t2, SAMPLE_TOKEN);
+
+        let encoded = format!(
+            "sing-box://import-remote-profile?url=https%3A%2F%2Fhp.example.com%2Fapi%2Fsub%2Fsingbox%3Ftoken%3D{SAMPLE_TOKEN}#HomeProxy"
+        );
+        let (u3, t3) = parse_connect_link(&encoded, false, false).unwrap();
+        assert_eq!(u3.as_str(), "https://hp.example.com/");
+        assert_eq!(t3, SAMPLE_TOKEN);
+
+        assert!(parse_connect_link("https://hp.example.com/other#abc", false, false).is_err());
+        assert!(parse_connect_link(
+            "sing-box://import-remote-profile?url=sing-box%3A%2F%2Fimport-remote-profile",
+            false,
+            false
+        )
+        .is_err());
     }
 }

@@ -2,21 +2,21 @@
   import {
     Activity, ArrowRight, ChevronDown, ChevronRight, Copy, DatabaseBackup,
     Globe, HardDrive, KeyRound, Layers, LayoutDashboard, Link2, LogOut,
-    Monitor, Plus, QrCode, RefreshCw, Router, Settings, Shield, Trash2, X
+    Monitor, Plus, RefreshCw, Router, Settings, Shield, Trash2, X
   } from 'lucide-svelte'
   import { onMount } from 'svelte'
   import Brand from '../../../packages/ui/Brand.svelte'
   import { actionNames, scopeOf } from '../../../packages/shared/models'
   import type { Action, Rule, RuleKind, ServiceGroup, ServiceGroupEntry } from '../../../packages/shared/models'
   import { admin } from './api'
-  import type { Device, Proxy, State, UpdateEntry, UpdatePolicy, User } from './api'
-  import { qrToSvg } from './qr'
+  import type { Device, Proxy, ServerUpdateCheck, State, UpdateEntry, UpdatePolicy, User } from './api'
 
   const TOKEN_KEY = 'homeproxy_admin_token'
 
   const views = [
     { id: 'overview', label: 'Обзор', icon: LayoutDashboard },
-    { id: 'network', label: 'Ресурсы и сеть', icon: Layers },
+    { id: 'resources', label: 'Ресурсы', icon: Layers },
+    { id: 'proxies', label: 'Прокси-узлы', icon: Router },
     { id: 'access', label: 'Доступ и ссылки', icon: KeyRound },
     { id: 'settings', label: 'Система', icon: Settings }
   ] as const
@@ -73,10 +73,9 @@
     policy: 'Чтение политики'
   }
 
-  type Dialog = 'invite' | 'ios' | 'proxy' | 'user' | 'routes' | 'rule' | 'group'
+  type Dialog = 'invite' | 'proxy' | 'user' | 'routes' | 'rule' | 'group'
   const dialogNames: Record<Dialog, string> = {
     invite: 'Новая ссылка',
-    ios: 'Для iOS (sing-box)',
     proxy: 'Прокси-узел',
     user: 'Профиль',
     routes: 'Очередь прокси',
@@ -86,7 +85,6 @@
 
   let view = $state<typeof views[number]['id']>('overview')
   let overviewSub = $state<'active' | 'history'>('active')
-  let netSub = $state<'resources' | 'proxies'>('resources')
   let expandedGroupId = $state<string | null>(null)
   let inlineEntryInputs = $state<Record<string, string>>({})
 
@@ -109,8 +107,6 @@
   let inviteCanEditGlobal = $state(false)
   let link = $state('')
   let subLink = $state('')
-  let iosDeepLink = $state('')
-  let iosDeviceLabel = $state('')
 
   let editingProxy = $state<Proxy>()
   let proxyHeadersText = $state('')
@@ -132,6 +128,9 @@
   let updateHistory = $state<Promise<UpdateEntry[] | null>>()
   let updatePolicy = $state<Promise<UpdatePolicy | null>>()
   let clientUpdatePolicy = $state<Promise<{ paused: boolean } | null>>()
+  let serverUpdate = $state<ServerUpdateCheck | null>(null)
+  let checkingUpdate = $state(false)
+  let updatingServer = $state(false)
 
   let title = $derived(views.find(item => item.id === view)?.label ?? 'Обзор')
   let activeDevices = $derived((data?.devices ?? []).filter(d => d.status !== 'revoked' && !d.expired))
@@ -216,6 +215,64 @@
     updateHistory = admin<UpdateEntry[]>(token, 'update-history').catch(() => null)
     updatePolicy = admin<UpdatePolicy>(token, 'update-policy').catch(() => null)
     clientUpdatePolicy = admin<{ paused: boolean }>(token, 'client-update-policy').catch(() => null)
+    void checkServerUpdate(true)
+  }
+
+  async function checkServerUpdate(silent = false) {
+    if (!silent) {
+      error = ''
+      message = ''
+    }
+    checkingUpdate = true
+    try {
+      const info = await admin<ServerUpdateCheck>(token, 'updates/check')
+      serverUpdate = info
+      if (!silent) {
+        message = info.available && info.latest
+          ? `Доступна новая версия сервера v${info.latest}`
+          : (info.reason === 'not_installed_release'
+            ? 'Локальная сборка без release-public.pem и homeproxy-verify-release.exe'
+            : info.reason === 'check_failed'
+              ? 'Не удалось проверить обновления на GitHub'
+              : `Установлена актуальная версия v${info.current}`)
+      }
+    } catch (e) {
+      if (!silent) error = e instanceof Error ? e.message : 'Не удалось проверить обновление'
+    } finally {
+      checkingUpdate = false
+    }
+  }
+
+  function applyServerUpdate() {
+    void task(async () => {
+      updatingServer = true
+      try {
+        const res = await admin<{ started: boolean; target?: string }>(token, 'updates/apply', 'POST')
+        const targetVer = res.target ?? serverUpdate?.latest ?? ''
+        message = targetVer
+          ? `Обновление до v${targetVer} запущено, ожидание перезапуска сервера…`
+          : 'Обновление сервера запущено…'
+        const deadline = Date.now() + 45_000
+        while (Date.now() < deadline) {
+          await new Promise(resolve => setTimeout(resolve, 1500))
+          try {
+            const h = await fetch('/healthz', { signal: AbortSignal.timeout(1500) })
+            if (h.ok) {
+              const info = await h.json()
+              if (!targetVer || info.version === targetVer) {
+                serverUpdate = null
+                await load()
+                message = `Сервер обновлён до v${info.version}`
+                return
+              }
+            }
+          } catch { /* server is restarting */ }
+        }
+        await load()
+      } finally {
+        updatingServer = false
+      }
+    })
   }
 
   function setUpdatesPaused(paused: boolean) {
@@ -285,7 +342,7 @@
   }
 
   function open(type: Dialog, item?: Proxy | Rule | User | ServiceGroup) {
-    error = ''; message = ''; dialog = type; link = ''; subLink = ''; iosDeepLink = ''; iosDeviceLabel = ''; label = ''; candidate = ''
+    error = ''; message = ''; dialog = type; link = ''; subLink = ''; label = ''; candidate = ''
     inviteLinkType = 'permanent'
     inviteDurationVal = 24
     inviteDurationUnit = 'h'
@@ -345,7 +402,7 @@
     }
   }
 
-  function showIosSubscription(device: Device) {
+  function copyIosSubscription(device: Device) {
     void task(async () => {
       let url = device.subUrl ?? ''
       if (!url) {
@@ -355,21 +412,10 @@
       }
       const deep = buildSingboxDeepLink(url)
       const copied = await copyText(deep)
-      error = ''
-      dialog = 'ios'
-      iosDeviceLabel = device.label
-      iosDeepLink = deep
-      modal?.showModal()
-      message = copied ? 'Ссылка для sing-box MT скопирована' : 'Отсканируйте QR-код камерой iPhone'
+      message = copied
+        ? `Ссылка для iOS (sing-box) скопирована: ${device.label}`
+        : `Ссылка для iOS готова: ${deep}`
     })
-  }
-
-  async function activateModalIosQr() {
-    if (!subLink) return
-    const deep = buildSingboxDeepLink(subLink)
-    iosDeepLink = deep
-    const copied = await copyText(deep)
-    message = copied ? 'Ссылка для sing-box MT скопирована' : 'Отсканируйте QR-код камерой iPhone'
   }
 
   function toggleDeviceAccess(device: Device) {
@@ -478,7 +524,6 @@
         })
         link = item.link
         subLink = item.subUrl ?? ''
-        iosDeepLink = ''
         if (navigator.clipboard?.writeText) {
           await navigator.clipboard.writeText(item.link).catch(() => {})
         }
@@ -699,13 +744,13 @@
                         </button>
                         <button
                           type="button"
-                          class="small"
-                          title="Для iOS (sing-box)"
+                          class="small ghost"
+                          title="Скопировать ссылку для iOS (sing-box)"
                           aria-label={`Для iOS (sing-box) · ${device.label}`}
                           disabled={busy}
-                          onclick={() => showIosSubscription(device)}
+                          onclick={() => copyIosSubscription(device)}
                         >
-                          <QrCode size={13} /> Для iOS (sing-box)
+                          <Copy size={14} />
                         </button>
                         <button
                           type="button"
@@ -741,228 +786,219 @@
             {/if}
           </section>
 
-        {:else if view === 'network'}
-          <div class="between">
-            <div class="hp-segmented sub-switch">
-              <button type="button" class:active-soft={netSub === 'resources'} onclick={() => netSub = 'resources'}>
-                Общие ресурсы
-              </button>
-              <button type="button" class:active-soft={netSub === 'proxies'} onclick={() => netSub = 'proxies'}>
-                Прокси-узлы
-              </button>
-            </div>
-            {#if netSub === 'resources'}
-              <div class="flex">
-                <input class="search" aria-label="Поиск ресурсов" placeholder="Поиск ресурсов" bind:value={search} />
-                <button type="button" class="primary small" onclick={() => open('group')}>
-                  <Plus size={14} /> Добавить ресурс
-                </button>
-              </div>
-            {:else}
-              <div class="flex">
-                <button type="button" class="small" disabled={!data.users.length} onclick={() => open('routes')}>Очередь прокси</button>
-                <button type="button" class="primary small" onclick={() => open('proxy')}>
-                  <Plus size={14} /> Добавить прокси
-                </button>
-              </div>
-            {/if}
+        {:else if view === 'resources'}
+          <div class="toolbar-row">
+            <input class="search" aria-label="Поиск ресурсов" placeholder="Поиск ресурсов" bind:value={search} />
+            <button type="button" class="primary small" onclick={() => open('group')}>
+              <Plus size={14} /> Добавить ресурс
+            </button>
           </div>
 
-          {#if netSub === 'resources'}
-            <section class="hp-card flush">
-              <div class="card-bar between">
-                <div class="flex">
-                  <Globe size={15} />
-                  <span class="section-title">Общие ресурсы</span>
-                </div>
-                <small class="muted">Редактирование с сервера · Все устройства</small>
+          <section class="hp-card flush">
+            <div class="card-bar between">
+              <div class="flex">
+                <Globe size={15} />
+                <span class="section-title">Общие ресурсы</span>
               </div>
-              {#if !data.groups.length}
-                <p class="empty pad">Нет общих ресурсов. Создайте ресурс, например ChatGPT или Рабочие ресурсы.</p>
-              {:else}
-                <div class="list-divide">
-                  {#each data.groups.filter(g => matches(g.name, username(g.userId), ...g.entries.map(e => e.pattern))) as group (group.id)}
-                    {@const gid = group.id ?? group.name}
-                    {@const expanded = expandedGroupId === gid}
-                    {@const activeEntries = group.entries.filter(e => e.enabled !== false).length}
-                    <div>
-                      <div class="res-header between">
-                        <button type="button" class="res-trigger" onclick={() => expandedGroupId = expanded ? null : gid}>
-                          {#if expanded}<ChevronDown size={14} />{:else}<ChevronRight size={14} />{/if}
-                          <span class="res-icon"><Layers size={14} /></span>
-                          <span class="card-head">
-                            <span class="flex">
-                              <strong>{group.name}</strong>
-                              <span class="mono count-tag">{activeEntries}/{group.entries.length}</span>
-                              {#if group.userId}<span class="scope-tag">{username(group.userId)}</span>{/if}
-                            </span>
-                            <span class="route-pill {routePillClass(group.action)}">{routeLabel(group.action)}</span>
+              <small class="muted">Редактирование с сервера · Все устройства</small>
+            </div>
+            {#if !data.groups.length}
+              <p class="empty pad">Нет общих ресурсов. Создайте ресурс, например ChatGPT или Рабочие ресурсы.</p>
+            {:else}
+              <div class="list-divide">
+                {#each data.groups.filter(g => matches(g.name, username(g.userId), ...g.entries.map(e => e.pattern))) as group (group.id)}
+                  {@const gid = group.id ?? group.name}
+                  {@const expanded = expandedGroupId === gid}
+                  {@const activeEntries = group.entries.filter(e => e.enabled !== false).length}
+                  <div>
+                    <div class="res-header between">
+                      <button type="button" class="res-trigger" onclick={() => expandedGroupId = expanded ? null : gid}>
+                        {#if expanded}<ChevronDown size={14} />{:else}<ChevronRight size={14} />{/if}
+                        <span class="res-icon"><Layers size={14} /></span>
+                        <span class="card-head">
+                          <span class="flex">
+                            <strong>{group.name}</strong>
+                            <span class="mono count-tag">{activeEntries}/{group.entries.length}</span>
+                            {#if group.userId}<span class="scope-tag">{username(group.userId)}</span>{/if}
                           </span>
-                        </button>
-                        <button
-                          type="button"
-                          class="hp-toggle"
-                          role="switch"
-                          aria-checked={group.enabled}
-                          aria-label={`Переключить ${group.name}`}
-                          disabled={busy}
-                          onclick={() => toggleGroup(group)}
-                        >
-                          <span class="hp-toggle-thumb"></span>
-                        </button>
-                      </div>
+                          <span class="route-pill {routePillClass(group.action)}">{routeLabel(group.action)}</span>
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        class="hp-toggle"
+                        role="switch"
+                        aria-checked={group.enabled}
+                        aria-label={`Переключить ${group.name}`}
+                        disabled={busy}
+                        onclick={() => toggleGroup(group)}
+                      >
+                        <span class="hp-toggle-thumb"></span>
+                      </button>
+                    </div>
 
-                      {#if expanded}
-                        <div class="res-body stack">
-                          <div class="between">
-                            <div class="flex route-btns">
-                              {#each [{ id: 'PROXY', label: 'Прокси' }, { id: 'LOCAL_DIRECT', label: 'Прямой' }, { id: 'BLOCK', label: 'Блок' }] as rt}
-                                <button
-                                  type="button"
-                                  class="small route-choice"
-                                  class:selected={group.action === rt.id}
-                                  disabled={busy}
-                                  onclick={() => setGroupRoute(group, rt.id as Action)}
-                                >
-                                  {rt.label}
-                                </button>
-                              {/each}
-                            </div>
-                            <div class="flex">
-                              <button type="button" class="small ghost" onclick={() => open('group', group)}>Изменить</button>
-                              <button type="button" class="small ghost danger" onclick={() => remove('groups/' + group.id, 'Удалить ресурс?')}>Удалить</button>
-                            </div>
+                    {#if expanded}
+                      <div class="res-body stack">
+                        <div class="between">
+                          <div class="flex route-btns">
+                            {#each [{ id: 'PROXY', label: 'Прокси' }, { id: 'LOCAL_DIRECT', label: 'Прямой' }, { id: 'BLOCK', label: 'Блок' }] as rt}
+                              <button
+                                type="button"
+                                class="small route-choice"
+                                class:selected={group.action === rt.id}
+                                disabled={busy}
+                                onclick={() => setGroupRoute(group, rt.id as Action)}
+                              >
+                                {rt.label}
+                              </button>
+                            {/each}
                           </div>
-
-                          {#if group.entries.length}
-                            <div class="entries-box-card list-divide">
-                              {#each group.entries as entry, idx (entry.kind + ':' + entry.pattern)}
-                                {@const enabled = entry.enabled !== false}
-                                <div class="entry-item between">
-                                  <div class="flex entry-left">
-                                    <span class="type-chip mono">{entryBadge(entry.kind)}</span>
-                                    <span class="mono entry-val" class:disabled={!enabled}>{entry.pattern}</span>
-                                  </div>
-                                  <div class="flex">
-                                    <button
-                                      type="button"
-                                      class="inline-toggle"
-                                      class:on={enabled}
-                                      disabled={busy}
-                                      onclick={() => toggleGroupEntry(group, idx)}
-                                    >
-                                      {enabled ? 'Вкл' : 'Выкл'}
-                                    </button>
-                                    <button
-                                      type="button"
-                                      class="icon-x"
-                                      aria-label={`Удалить ${entry.pattern}`}
-                                      disabled={busy}
-                                      onclick={() => removeGroupEntry(group, idx)}
-                                    >
-                                      <X size={13} />
-                                    </button>
-                                  </div>
-                                </div>
-                              {/each}
-                            </div>
-                          {/if}
-
-                          <div class="inline-add">
-                            <input
-                              type="text"
-                              class="mono"
-                              placeholder="Добавить домен, IP или .exe в группу…"
-                              value={inlineEntryInputs[gid] ?? ''}
-                              oninput={e => inlineEntryInputs = { ...inlineEntryInputs, [gid]: e.currentTarget.value }}
-                              onkeydown={e => { if (e.key === 'Enter') { e.preventDefault(); addInlineEntry(group) } }}
-                            />
-                            <button type="button" class="small" disabled={busy} onclick={() => addInlineEntry(group)}>+</button>
+                          <div class="flex">
+                            <button type="button" class="small ghost" onclick={() => open('group', group)}>Изменить</button>
+                            <button type="button" class="small ghost danger" onclick={() => remove('groups/' + group.id, 'Удалить ресурс?')}>Удалить</button>
                           </div>
                         </div>
-                      {/if}
-                    </div>
-                  {/each}
-                </div>
-              {/if}
-            </section>
 
-            <section class="hp-card stack">
-              <div class="between">
-                <div class="flex">
-                  <HardDrive size={15} />
-                  <h2>Точечные правила ({data.rules.length})</h2>
-                </div>
-                <button type="button" class="small" onclick={() => open('rule')}>
-                  <Plus size={14} /> Добавить правило
-                </button>
-              </div>
-              {#if !data.rules.length}
-                <p class="empty">Точечных правил пока нет.</p>
-              {:else}
-                <div class="table-scroll">
-                  <table>
-                    <thead><tr><th>Шаблон</th><th>Область</th><th>Маршрут</th><th>Статус</th><th>Действия</th></tr></thead>
-                    <tbody>
-                      {#each data.rules.filter(r => matches(r.pattern, username(r.userId))) as rule (rule.id)}
-                        <tr>
-                          <td data-label="Шаблон" class="mono">{rule.pattern}</td>
-                          <td data-label="Область">{scopeOf(rule)}{rule.userId ? ' · ' + username(rule.userId) : ''}</td>
-                          <td data-label="Маршрут">{actionNames[rule.action]}</td>
-                          <td data-label="Статус">
-                            <button type="button" class="small" disabled={busy} onclick={() => toggleRule(rule)}>
-                              {rule.enabled !== false ? 'Вкл' : 'Выкл'}
-                            </button>
-                          </td>
-                          <td>
-                            <div class="flex">
-                              <button type="button" class="small" onclick={() => open('rule', rule)}>Изменить</button>
-                              <button type="button" class="small danger" onclick={() => remove('rules/' + rule.id, 'Удалить правило?')}>Удалить</button>
-                            </div>
-                          </td>
-                        </tr>
-                      {/each}
-                    </tbody>
-                  </table>
-                </div>
-              {/if}
-            </section>
-          {:else}
-            {#if !data.proxies.length}
-              <div class="hp-card"><p class="empty">Добавьте прокси-узел и назначьте его профилю.</p></div>
-            {:else}
-              <div class="proxy-grid">
-                {#each data.proxies.filter(p => matches(p.name, p.host)) as proxy (proxy.id)}
-                  <div class="hp-card stack proxy-card">
-                    <div class="between">
-                      <div class="card-head">
-                        <h2>{proxy.name}</h2>
-                        <small class="mono muted">
-                          {proxy.tls ? 'HTTPS CONNECT' : 'HTTP CONNECT'} · {proxy.host}:{proxy.port}
-                          {#if proxy.headers && Object.keys(proxy.headers).length} · +{Object.keys(proxy.headers).length} заг.{/if}
-                        </small>
+                        {#if group.entries.length}
+                          <div class="entries-box-card list-divide">
+                            {#each group.entries as entry, idx (entry.kind + ':' + entry.pattern)}
+                              {@const enabled = entry.enabled !== false}
+                              <div class="entry-item between">
+                                <div class="flex entry-left">
+                                  <span class="type-chip mono">{entryBadge(entry.kind)}</span>
+                                  <span class="mono entry-val" class:disabled={!enabled} title={entry.pattern}>{entry.pattern}</span>
+                                </div>
+                                <div class="flex">
+                                  <button
+                                    type="button"
+                                    class="inline-toggle"
+                                    class:on={enabled}
+                                    disabled={busy}
+                                    onclick={() => toggleGroupEntry(group, idx)}
+                                  >
+                                    {enabled ? 'Вкл' : 'Выкл'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    class="icon-x"
+                                    aria-label={`Удалить ${entry.pattern}`}
+                                    disabled={busy}
+                                    onclick={() => removeGroupEntry(group, idx)}
+                                  >
+                                    <X size={13} />
+                                  </button>
+                                </div>
+                              </div>
+                            {/each}
+                          </div>
+                        {/if}
+
+                        <div class="inline-add">
+                          <input
+                            type="text"
+                            class="mono"
+                            placeholder="Добавить домен, IP или .exe в группу…"
+                            value={inlineEntryInputs[gid] ?? ''}
+                            oninput={e => inlineEntryInputs = { ...inlineEntryInputs, [gid]: e.currentTarget.value }}
+                            onkeydown={e => { if (e.key === 'Enter') { e.preventDefault(); addInlineEntry(group) } }}
+                          />
+                          <button type="button" class="small" disabled={busy} onclick={() => addInlineEntry(group)}>+</button>
+                        </div>
                       </div>
-                      <Router size={16} />
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          </section>
+
+          <section class="hp-card flush">
+            <div class="card-bar between">
+              <div class="flex">
+                <HardDrive size={15} />
+                <span class="section-title">Точечные правила ({data.rules.length})</span>
+              </div>
+              <button type="button" class="small" onclick={() => open('rule')}>
+                <Plus size={14} /> Добавить правило
+              </button>
+            </div>
+            {#if !data.rules.length}
+              <p class="empty pad">Точечных правил пока нет.</p>
+            {:else}
+              <div class="list-divide">
+                {#each data.rules.filter(r => matches(r.pattern, username(r.userId))) as rule (rule.id)}
+                  {@const activeRule = rule.enabled !== false}
+                  <div class="rule-row between">
+                    <div class="rule-main">
+                      <div class="flex rule-top">
+                        <span class="type-chip mono">{entryBadge(rule.kind)}</span>
+                        <span class="mono entry-val" class:disabled={!activeRule} title={rule.pattern}>{rule.pattern}</span>
+                      </div>
+                      <div class="flex rule-meta">
+                        <span class="route-pill {routePillClass(rule.action)}">{routeLabel(rule.action)}</span>
+                        <small class="muted">{scopeOf(rule)}{rule.userId ? ' · ' + username(rule.userId) : ''}</small>
+                      </div>
                     </div>
-                    <div class="flex">
-                      <button type="button" class="small" disabled={busy} onclick={() => probe(proxy)}>Проверить</button>
-                      <button type="button" class="small" onclick={() => open('proxy', proxy)}>Изменить</button>
-                      <button type="button" class="small danger" onclick={() => remove('proxies/' + proxy.id, 'Удалить прокси?')}>Удалить</button>
+                    <div class="rule-actions">
+                      <button
+                        type="button"
+                        class="hp-toggle"
+                        role="switch"
+                        aria-checked={activeRule}
+                        aria-label={`Переключить правило ${rule.pattern}`}
+                        disabled={busy}
+                        onclick={() => toggleRule(rule)}
+                      >
+                        <span class="hp-toggle-thumb"></span>
+                      </button>
+                      <button type="button" class="small ghost" onclick={() => open('rule', rule)}>Изменить</button>
+                      <button type="button" class="icon-x" aria-label={`Удалить правило ${rule.pattern}`} disabled={busy} onclick={() => remove('rules/' + rule.id, 'Удалить правило?')}>
+                        <X size={14} />
+                      </button>
                     </div>
                   </div>
                 {/each}
               </div>
             {/if}
+          </section>
+
+        {:else if view === 'proxies'}
+          <div class="toolbar-row">
+            <small class="muted">Всего узлов: {data.proxies.length}</small>
+            <div class="flex">
+              <button type="button" class="small" disabled={!data.users.length} onclick={() => open('routes')}>Очередь прокси</button>
+              <button type="button" class="primary small" onclick={() => open('proxy')}>
+                <Plus size={14} /> Добавить прокси
+              </button>
+            </div>
+          </div>
+          {#if !data.proxies.length}
+            <div class="hp-card"><p class="empty">Добавьте прокси-узел и назначьте его профилю.</p></div>
+          {:else}
+            <div class="proxy-grid">
+              {#each data.proxies.filter(p => matches(p.name, p.host)) as proxy (proxy.id)}
+                <div class="hp-card stack proxy-card">
+                  <div class="between">
+                    <div class="card-head">
+                      <h2>{proxy.name}</h2>
+                      <small class="mono muted">
+                        {proxy.tls ? 'HTTPS CONNECT' : 'HTTP CONNECT'} · {proxy.host}:{proxy.port}
+                        {#if proxy.headers && Object.keys(proxy.headers).length} · +{Object.keys(proxy.headers).length} заг.{/if}
+                      </small>
+                    </div>
+                    <Router size={16} />
+                  </div>
+                  <div class="flex">
+                    <button type="button" class="small" disabled={busy} onclick={() => probe(proxy)}>Проверить</button>
+                    <button type="button" class="small" onclick={() => open('proxy', proxy)}>Изменить</button>
+                    <button type="button" class="small danger" onclick={() => remove('proxies/' + proxy.id, 'Удалить прокси?')}>Удалить</button>
+                  </div>
+                </div>
+              {/each}
+            </div>
           {/if}
 
         {:else if view === 'access'}
-          <div class="hp-card between">
-            <div class="card-head">
-              <h2>Админ-панель без пароля пользователей</h2>
-              <small class="muted">Единственный администратор сервера · универсальные ссылки выдаются клиентам</small>
-            </div>
-            <span class="badge ok">Активно</span>
-          </div>
 
           <section class="hp-card flush">
             <div class="card-bar between">
@@ -1013,12 +1049,27 @@
             <div class="list-divide">
               <div class="device-row between">
                 <div class="card-head">
-                  <strong>HomeProxy Server</strong>
+                  <div class="flex">
+                    <strong>HomeProxy Server</strong>
+                    {#if serverUpdate?.available && serverUpdate.latest}
+                      <span class="badge ok">Доступна v{serverUpdate.latest}</span>
+                    {/if}
+                  </div>
                   <small class="muted mono">
                     {#if serverRelease?.version}v{serverRelease.version} · API {serverRelease.api} · SQLite v{serverRelease.dbSchema}{:else}Версия недоступна{/if}
                   </small>
                 </div>
-                <a class="small-link" href="https://github.com/C0dece/HomeProxy/releases/latest" target="_blank" rel="noopener noreferrer">GitHub Releases</a>
+                <div class="flex">
+                  <button type="button" class="small" disabled={busy || checkingUpdate || updatingServer} onclick={() => checkServerUpdate(false)}>
+                    <RefreshCw size={13} /> {checkingUpdate ? 'Проверка…' : 'Проверить'}
+                  </button>
+                  {#if serverUpdate?.available && serverUpdate.canApply}
+                    <button type="button" class="primary small" disabled={busy || updatingServer} onclick={applyServerUpdate}>
+                      {updatingServer ? 'Обновление…' : `Обновить до v${serverUpdate.latest}`}
+                    </button>
+                  {/if}
+                  <a class="small-link" href={serverUpdate?.releaseUrl || 'https://github.com/C0dece/HomeProxy/releases/latest'} target="_blank" rel="noopener noreferrer">GitHub</a>
+                </div>
               </div>
 
               <div class="device-row between">
@@ -1059,94 +1110,105 @@
                   {/if}
                 {/await}
               </div>
+
+              <div class="device-row between">
+                <div class="card-head">
+                  <span>Резервная копия базы SQLite</span>
+                  <small class="muted">Сохраняет профили, правила, узлы и активные ссылки</small>
+                </div>
+                <button type="button" class="small" disabled={busy} onclick={backup}>
+                  <DatabaseBackup size={14} /> Создать копию SQLite
+                </button>
+              </div>
             </div>
           </section>
 
-          <section class="hp-card stack">
-            <h2>Версии клиентских устройств</h2>
-            {#if !data.devices.length}
-              <p class="empty">Устройств пока нет.</p>
-            {:else}
-              <div class="table-scroll">
-                <table>
-                  <thead><tr><th>Устройство</th><th>Платформа</th><th>Версия</th><th>Отчёт</th></tr></thead>
-                  <tbody>
-                    {#each data.devices as device (device.id)}
-                      <tr>
-                        <td data-label="Устройство">{device.label}{#if device.status === 'revoked'} <span class="badge bad">Закрыта</span>{/if}</td>
-                        <td data-label="Платформа">{platformLabel(device)}</td>
-                        <td data-label="Версия" class="mono">{device.installedVersion || 'Нет данных'}</td>
-                        <td data-label="Отчёт">{stamp(device.reportedAt ?? 0)}</td>
-                      </tr>
-                    {/each}
-                  </tbody>
-                </table>
-              </div>
-            {/if}
-          </section>
-
-          <section class="hp-card stack">
-            <h2>История обновлений сервера</h2>
-            {#await updateHistory}
-              <p class="muted" role="status">Загрузка истории…</p>
-            {:then entries}
-              {#if !entries}
-                <p class="notice error" role="alert">История обновлений недоступна.</p>
-              {:else if !entries.length}
-                <p class="empty">Пока нет записей об обновлениях.</p>
+          <details class="hp-card sys-details">
+            <summary>Версии клиентских устройств ({data.devices.length})</summary>
+            <div class="sys-body">
+              {#if !data.devices.length}
+                <p class="empty">Устройств пока нет.</p>
               {:else}
                 <div class="table-scroll">
                   <table>
-                    <thead><tr><th>Время завершения</th><th>Результат</th><th>Подробности</th></tr></thead>
+                    <thead><tr><th>Устройство</th><th>Платформа</th><th>Версия</th><th>Отчёт</th></tr></thead>
                     <tbody>
-                      {#each entries as entry}
+                      {#each data.devices as device (device.id)}
                         <tr>
-                          <td data-label="Время">{stamp(entry.finishedAt)}</td>
-                          <td data-label="Результат">
-                            <span class="badge update-outcome" class:ok={entry.outcome === 'installed'} class:bad={entry.outcome === 'failed'}>
-                              {updateOutcomes[entry.outcome]}
-                            </span>
-                          </td>
-                          <td data-label="Подробности">
-                            {#if entry.version}Версия {entry.version}
-                            {:else if entry.outcome === 'failed'}{updatePhases[entry.phase]}{#if entry.exitCode !== undefined}, код {entry.exitCode}{/if}
-                            {:else}Стабильный канал{/if}
-                          </td>
+                          <td data-label="Устройство">{device.label}{#if device.status === 'revoked'} <span class="badge bad">Закрыта</span>{/if}</td>
+                          <td data-label="Платформа">{platformLabel(device)}</td>
+                          <td data-label="Версия" class="mono">{device.installedVersion || 'Нет данных'}</td>
+                          <td data-label="Отчёт">{stamp(device.reportedAt ?? 0)}</td>
                         </tr>
                       {/each}
                     </tbody>
                   </table>
                 </div>
               {/if}
-            {/await}
-          </section>
-
-          <section class="hp-card stack">
-            <div class="between">
-              <h2>Журнал событий и резервные копии</h2>
-              <button type="button" class="small" disabled={busy} onclick={backup}>
-                <DatabaseBackup size={14} /> Создать копию SQLite
-              </button>
             </div>
-            {#if !data.audit.length}
-              <p class="empty">В журнале пока нет событий.</p>
-            {:else}
-              <div class="table-scroll">
-                <table>
-                  <thead><tr><th>Версия</th><th>Событие</th><th>Время</th></tr></thead>
-                  <tbody>
-                    {#each data.audit.slice(0, 20) as entry (entry.revision)}
-                      <tr>
-                        <td data-label="Версия" class="mono">v{entry.revision}</td>
-                        <td data-label="Событие">{eventNames[entry.event] ?? entry.event}</td>
-                        <td data-label="Время">{stamp(entry.time)}</td>
-                      </tr>
-                    {/each}
-                  </tbody>
-                </table>
-              </div>
-            {/if}
-          </section>
+          </details>
+
+          <details class="hp-card sys-details">
+            <summary>История обновлений сервера</summary>
+            <div class="sys-body">
+              {#await updateHistory}
+                <p class="muted" role="status">Загрузка истории…</p>
+              {:then entries}
+                {#if !entries}
+                  <p class="notice error" role="alert">История обновлений недоступна.</p>
+                {:else if !entries.length}
+                  <p class="empty">Пока нет записей об обновлениях.</p>
+                {:else}
+                  <div class="table-scroll">
+                    <table>
+                      <thead><tr><th>Время завершения</th><th>Результат</th><th>Подробности</th></tr></thead>
+                      <tbody>
+                        {#each entries as entry}
+                          <tr>
+                            <td data-label="Время">{stamp(entry.finishedAt)}</td>
+                            <td data-label="Результат">
+                              <span class="badge update-outcome" class:ok={entry.outcome === 'installed'} class:bad={entry.outcome === 'failed'}>
+                                {updateOutcomes[entry.outcome]}
+                              </span>
+                            </td>
+                            <td data-label="Подробности">
+                              {#if entry.version}Версия {entry.version}
+                              {:else if entry.outcome === 'failed'}{updatePhases[entry.phase]}{#if entry.exitCode !== undefined}, код {entry.exitCode}{/if}
+                              {:else}Стабильный канал{/if}
+                            </td>
+                          </tr>
+                        {/each}
+                      </tbody>
+                    </table>
+                  </div>
+                {/if}
+              {/await}
+            </div>
+          </details>
+
+          <details class="hp-card sys-details">
+            <summary>Журнал событий ({data.audit.length})</summary>
+            <div class="sys-body">
+              {#if !data.audit.length}
+                <p class="empty">В журнале пока нет событий.</p>
+              {:else}
+                <div class="table-scroll">
+                  <table>
+                    <thead><tr><th>Версия</th><th>Событие</th><th>Время</th></tr></thead>
+                    <tbody>
+                      {#each data.audit.slice(0, 20) as entry (entry.revision)}
+                        <tr>
+                          <td data-label="Версия" class="mono">v{entry.revision}</td>
+                          <td data-label="Событие">{eventNames[entry.event] ?? entry.event}</td>
+                          <td data-label="Время">{stamp(entry.time)}</td>
+                        </tr>
+                      {/each}
+                    </tbody>
+                  </table>
+                </div>
+              {/if}
+            </div>
+          </details>
         {/if}
       </main>
     </div>
@@ -1154,45 +1216,36 @@
 {/if}
 
 {#if connected && data}
-  <dialog bind:this={modal} onclick={e => { if (e.target === modal) modal?.close() }} onclose={() => { error = ''; link = ''; subLink = ''; iosDeepLink = ''; iosDeviceLabel = '' }}>
+  <dialog bind:this={modal} onclick={e => { if (e.target === modal) modal?.close() }} onclose={() => { error = ''; link = ''; subLink = '' }}>
     <div class="stack">
       <div class="between">
         <h2>{dialog === 'user' ? (editingUser ? 'Изменить имя' : 'Добавить профиль') : dialogNames[dialog]}</h2>
         <button type="button" class="small ghost" aria-label="Закрыть" onclick={() => modal?.close()}><X size={16} /></button>
       </div>
       {#if error}<p class="notice error" role="alert">{error}</p>{/if}
-      {#if dialog === 'ios' && iosDeepLink}
+      {#if link}
         <div class="stack">
-          {#if iosDeviceLabel}<small class="muted">Устройство: <strong>{iosDeviceLabel}</strong></small>{/if}
-          <div class="qr-panel">
-            <div class="qr-svg">{@html qrToSvg(iosDeepLink)}</div>
-            <small class="qr-hint">Отсканируйте камерой iPhone — профиль импортируется в <strong>sing-box MT</strong> в один тап.</small>
-          </div>
-          <div class="link-box mono">{iosDeepLink}</div>
-          <button type="button" class="primary" onclick={() => task(async () => { await navigator.clipboard.writeText(iosDeepLink); message = 'Ссылка для sing-box MT скопирована' })}>
-            <Copy size={14} /> Скопировать ссылку для sing-box
-          </button>
-          {#if message}<p role="status" class="success">{message}</p>{/if}
-        </div>
-      {:else if link}
-        <div class="stack">
-          <div class="link-box mono">{link}</div>
-          <div class="flex">
-            <button type="button" class="primary" onclick={() => task(async () => { await navigator.clipboard.writeText(link); message = 'Ссылка скопирована' })}>
-              <Copy size={14} /> Скопировать ссылку
-            </button>
-            {#if subLink}
-              <button type="button" onclick={() => void activateModalIosQr()}>
-                <QrCode size={14} /> Для iOS (sing-box)
+          <div class="stack invite-block">
+            <div class="between">
+              <span class="label">Ссылка HomeProxy</span>
+              <button type="button" class="small primary" onclick={() => task(async () => { await navigator.clipboard.writeText(link); message = 'Ссылка скопирована' })}>
+                <Copy size={13} /> Скопировать
               </button>
-            {/if}
-          </div>
-          {#if iosDeepLink}
-            <div class="qr-panel">
-              <div class="qr-svg">{@html qrToSvg(iosDeepLink)}</div>
-              <small class="qr-hint">Отсканируйте камерой iPhone — профиль импортируется в <strong>sing-box MT</strong> в один тап.</small>
             </div>
-            <div class="link-box mono">{iosDeepLink}</div>
+            <div class="link-box mono">{link}</div>
+          </div>
+          {#if subLink}
+            {@const singboxLink = buildSingboxDeepLink(subLink)}
+            <div class="stack invite-block">
+              <div class="between">
+                <span class="label">Для iOS (sing-box MT)</span>
+                <button type="button" class="small" onclick={() => task(async () => { await navigator.clipboard.writeText(singboxLink); message = 'Ссылка для sing-box MT скопирована' })}>
+                  <Copy size={13} /> Скопировать
+                </button>
+              </div>
+              <div class="link-box mono">{singboxLink}</div>
+              <small class="muted">Работает в sing-box MT (iOS) и в HomeProxy.</small>
+            </div>
           {/if}
           {#if message}<p role="status" class="success">{message}</p>{/if}
         </div>
@@ -1478,9 +1531,11 @@
     border: 1px solid rgba(255, 255, 255, 0.06);
     background: rgba(18, 18, 21, 0.72);
   }
-  .entry-item { padding: 8px 12px; font-size: .78rem; }
-  .entry-left { min-width: 0; flex: 1; }
+  .toolbar-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+  .entry-item { padding: 8px 12px; font-size: .78rem; gap: 10px; flex-wrap: nowrap; }
+  .entry-left { min-width: 0; flex: 1; flex-wrap: nowrap; }
   .type-chip {
+    flex: none;
     font-size: .6rem;
     text-transform: uppercase;
     padding: 2px 6px;
@@ -1488,8 +1543,35 @@
     background: rgba(255, 255, 255, 0.06);
     color: #A1A1AA;
   }
-  .entry-val { font-size: .74rem; color: #E4E4E7; }
+  .entry-val {
+    font-size: .74rem;
+    color: #E4E4E7;
+    min-width: 0;
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .entry-val.disabled { color: #71717A; text-decoration: line-through; }
+  .rule-row { padding: 11px 16px; gap: 12px; flex-wrap: nowrap; }
+  .rule-main { min-width: 0; flex: 1; display: grid; gap: 4px; }
+  .rule-top { min-width: 0; flex-wrap: nowrap; }
+  .rule-meta { gap: 8px; }
+  .rule-actions { display: flex; align-items: center; gap: 8px; flex: none; }
+  .sys-details { padding: 0; overflow: hidden; }
+  .sys-details summary {
+    padding: 13px 16px;
+    font-size: .86rem;
+    font-weight: 600;
+    color: #FFFFFF;
+    cursor: pointer;
+    list-style: none;
+    user-select: none;
+  }
+  .sys-details summary::before { content: "▸ "; color: var(--muted); font-size: .78rem; }
+  .sys-details[open] summary::before { content: "▾ "; }
+  .sys-body { padding: 0 16px 16px; border-top: 1px solid rgba(255, 255, 255, 0.06); }
+  .invite-block { gap: 8px; }
   .inline-toggle {
     min-height: 22px;
     padding: 2px 7px;
@@ -1520,34 +1602,6 @@
     font-size: .74rem;
     color: #E4E4E7;
     word-break: break-all;
-  }
-  .qr-panel {
-    display: grid;
-    justify-items: center;
-    gap: 10px;
-    padding: 14px;
-    border-radius: 12px;
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid var(--hp-border);
-    text-align: center;
-  }
-  .qr-svg {
-    width: 204px;
-    height: 204px;
-    border-radius: 10px;
-    overflow: hidden;
-    background: #ffffff;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
-  }
-  .qr-svg :global(svg) {
-    display: block;
-    width: 100%;
-    height: 100%;
-  }
-  .qr-hint {
-    font-size: .76rem;
-    color: var(--muted);
-    max-width: 320px;
   }
   .modal-actions { justify-content: flex-end; }
   .entries-box { gap: 10px; border: 1px solid var(--hp-border); padding: 12px; border-radius: 12px; background: #09090B; }

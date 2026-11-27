@@ -206,7 +206,7 @@ func TestUpdateTransactionWithServer(t *testing.T) {
 		}
 	}
 
-	sign("0.2.0", fixtureSchema+1)
+	sign("0.2.0", fixtureSchema-1)
 	if err := i.apply(manifest, sig, key, pkg, "dev"); err == nil {
 		t.Fatal("incompatible package was accepted")
 	}

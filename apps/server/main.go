@@ -367,6 +367,8 @@ func (s *server) localAdminHandler() http.Handler {
 func (s *server) adminRoutes(r *http.ServeMux) {
 	r.HandleFunc("GET /healthz", s.health)
 	r.HandleFunc("GET /api/v1/admin/state", s.admin(s.state))
+	r.HandleFunc("GET /api/v1/admin/updates/check", s.admin(s.checkServerUpdate))
+	r.HandleFunc("POST /api/v1/admin/updates/apply", s.admin(s.applyServerUpdate))
 	r.HandleFunc("GET /api/v1/admin/update-history", s.admin(s.updateHistory))
 	r.HandleFunc("GET /api/v1/admin/update-policy", s.admin(s.updatePolicy))
 	r.HandleFunc("PUT /api/v1/admin/update-policy", s.admin(s.updatePolicy))

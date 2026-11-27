@@ -42,6 +42,8 @@ try {
   await admin.getByRole('heading', { name: 'Система', exact: true }).waitFor()
   await admin.getByText('v' + running.version, { exact: false }).waitFor()
   assert.equal(await admin.getByRole('heading', { name: 'Последние изменения' }).count(), 0)
+  await admin.locator('summary', { hasText: 'История обновлений сервера' }).click()
+  await admin.locator('summary', { hasText: 'Версии клиентских устройств' }).click()
   await admin.getByText('Версия 1.2.3', { exact: true }).waitFor()
   await admin.getByText('Восстановление, код 7', { exact: true }).waitFor()
   await admin.getByText('Нет совместимого обновления', { exact: true }).waitFor()
@@ -76,17 +78,17 @@ try {
 
   await admin.setViewportSize({ width: 390, height: 840 })
   await admin.getByRole('button', { name: 'Система', exact: true }).click()
+  await admin.locator('summary', { hasText: 'История обновлений сервера' }).click()
   await admin.getByText('Нет совместимого обновления', { exact: true }).waitFor()
   assert.equal(await admin.evaluate(() => document.documentElement.scrollWidth), 390)
   await admin.screenshot({ path: join(screenshots, 'admin-updates-narrow.png'), fullPage: true })
 
-  await admin.getByRole('button', { name: 'Ресурсы и сеть', exact: true }).click()
   await admin.getByRole('button', { name: 'Прокси-узлы', exact: true }).click()
   await admin.getByRole('button', { name: 'Добавить прокси', exact: true }).waitFor()
   assert.equal(await admin.evaluate(() => document.documentElement.scrollWidth), 390)
   await admin.screenshot({ path: join(screenshots, 'admin-narrow.png') })
 
-  await admin.getByRole('button', { name: 'Общие ресурсы', exact: true }).click()
+  await admin.getByRole('button', { name: 'Ресурсы', exact: true }).click()
   await admin.getByRole('button', { name: 'Добавить правило' }).click()
   await admin.getByRole('dialog').locator('select[name="kind"]').selectOption('process')
   await admin.getByLabel('Шаблон').fill('qa-admin.exe')
@@ -157,6 +159,7 @@ try {
 
   await admin.getByRole('button', { name: 'Система', exact: true }).click()
   await admin.getByRole('button', { name: 'Обновить данные' }).click()
+  await admin.locator('summary', { hasText: 'Версии клиентских устройств' }).click()
   const browserDevice = admin.getByRole('row').filter({ hasText: 'Chromium QA' })
   await browserDevice.getByText('Расширение', { exact: true }).waitFor()
   await browserDevice.getByText(/^\d+\.\d+\.\d+$/).waitFor()

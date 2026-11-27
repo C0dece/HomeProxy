@@ -114,7 +114,7 @@ func choose(raw, signature, publicKey []byte, selected selection) (artifact, err
 			return result, errors.New("invalid release entry")
 		}
 		if !v.after(selected.current) || selected.api < entry.APIMin || selected.api > entry.APIMax ||
-			entry.Component == "server" && entry.DBSchema != selected.dbSchema {
+			entry.Component == "server" && entry.DBSchema < selected.dbSchema {
 			continue
 		}
 		switch {

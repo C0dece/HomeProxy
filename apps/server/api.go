@@ -406,8 +406,9 @@ func (s *server) invite(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "invalid_invite")
 		return
 	}
-	id, token, subToken := uuid(), randomToken(), randomToken()
-	subEnc := s.secrets.Seal(nil, nil, []byte(subToken), []byte(id))
+	id, token := uuid(), randomToken()
+	tokenHash := digest(token)
+	subEnc := s.secrets.Seal(nil, nil, []byte(token), []byte(id))
 	err := s.mutate("device.invited", false, func(tx *sql.Tx, _ int64) error {
 		userID := input.UserID
 		if userID == "" {
@@ -424,14 +425,14 @@ func (s *server) invite(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		_, err := tx.Exec(`INSERT INTO devices(id,user_id,label,transport,invite_hash,expires,primary_id,direct_id,universal,can_edit_global,link_type,link_duration_sec,access_expires,access_enabled,sub_token_hash,sub_token_enc)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)`, id, userID, input.Label, transport, digest(token), expiry, uuid(), uuid(), isUniversal, input.CanEditGlobal, linkType, durationSec, accessExpires, digest(subToken), subEnc)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)`, id, userID, input.Label, transport, tokenHash, expiry, uuid(), uuid(), isUniversal, input.CanEditGlobal, linkType, durationSec, accessExpires, tokenHash, subEnc)
 		return err
 	})
 	if !report(w, err) {
 		send(w, 201, obj{
 			"id":            id,
 			"link":          strings.TrimRight(s.cfg.PublicURL, "/") + "/connect#" + token,
-			"subUrl":        s.subURL(subToken),
+			"subUrl":        s.subURL(token),
 			"expires":       expiry,
 			"accessExpires": accessExpires,
 			"linkType":      linkType,
@@ -462,8 +463,9 @@ func (s *server) connect(w http.ResponseWriter, r *http.Request) {
 	}
 	var id string
 	err := s.mutate("device.connected", in.Transport == "agent", func(tx *sql.Tx, _ int64) error {
-		err := tx.QueryRow(`SELECT id FROM devices WHERE invite_hash=? AND (transport=? OR universal=1) AND revoked=0
-			AND access_enabled=1 AND token_hash IS NULL AND (expires=0 OR expires>?)`, digest(in.Token), in.Transport, time.Now().Unix()).Scan(&id)
+		tokDigest := digest(in.Token)
+		err := tx.QueryRow(`SELECT id FROM devices WHERE (invite_hash=? OR sub_token_hash=?) AND (transport=? OR universal=1) AND revoked=0
+			AND access_enabled=1 AND token_hash IS NULL AND (expires=0 OR expires>?)`, tokDigest, tokDigest, in.Transport, time.Now().Unix()).Scan(&id)
 		if errors.Is(err, sql.ErrNoRows) {
 			return apiError{401, "invalid_or_expired_link"}
 		}

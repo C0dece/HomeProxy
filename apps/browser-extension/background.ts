@@ -309,15 +309,42 @@ function resolveSiteRoute(rule?: Rule): SiteRoute {
   return 'auto'
 }
 
+function parseConnectLink(raw: string, nested = false): { origin: string; token: string } {
+  const trimmed = raw.trim()
+  const url = new URL(trimmed)
+  if (!nested && url.protocol === 'sing-box:' && (url.hostname === 'import-remote-profile' || url.pathname === '//import-remote-profile')) {
+    const inner = url.searchParams.get('url')
+    if (!inner) throw new Error('В ссылке sing-box отсутствует параметр url')
+    return parseConnectLink(inner, true)
+  }
+  const loopback = url.hostname === '127.0.0.1' && url.protocol === 'http:'
+  if (!(url.protocol === 'https:' || loopback) || url.username || url.password) {
+    throw new Error('Укажите персональную HTTPS-ссылку')
+  }
+  let inviteToken = ''
+  if (url.pathname === '/connect') {
+    if (url.search || !/^#[a-zA-Z0-9_-]{43}$/.test(url.hash)) {
+      throw new Error('Укажите персональную HTTPS-ссылку')
+    }
+    inviteToken = url.hash.slice(1)
+  } else if (url.pathname === '/api/sub/singbox') {
+    const t = url.searchParams.get('token') ?? ''
+    if (!/^[a-zA-Z0-9_-]{43}$/.test(t)) {
+      throw new Error('Укажите персональную HTTPS-ссылку')
+    }
+    inviteToken = t
+  } else {
+    throw new Error('Укажите персональную HTTPS-ссылку')
+  }
+  return { origin: url.origin, token: inviteToken }
+}
+
 async function handle(input: Incoming) {
   let state = await load()
   let agentDetected = state.mode === 'agent' ? await detectLocalAgent(state.agentPort) : false
 
   if (input.command === 'connect') {
-    const url = new URL(input.link?.trim() ?? '')
-    const loopback = url.hostname === '127.0.0.1' && url.protocol === 'http:'
-    if (!(url.protocol === 'https:' || loopback) || url.pathname !== '/connect' || url.username || url.password || url.search ||
-        !/^#[a-zA-Z0-9_-]{43}$/.test(url.hash)) throw new Error('Укажите персональную HTTPS-ссылку')
+    const parsed = parseConnectLink(input.link ?? '')
     const candidate: BrowserState = {
       ...initial,
       mode: 'agent',
@@ -325,12 +352,12 @@ async function handle(input: Incoming) {
       autoBaseRoute: state.autoBaseRoute,
       agentPort: state.agentPort,
       standaloneProxy: state.standaloneProxy,
-      origin: url.origin,
+      origin: parsed.origin,
       key: token(),
       local: state.local
     }
     const response = await api(candidate, 'connect', { method: 'POST',
-      body: JSON.stringify({ token: url.hash.slice(1), deviceKey: candidate.key, transport: 'browser' }) })
+      body: JSON.stringify({ token: parsed.token, deviceKey: candidate.key, transport: 'browser' }) })
     if (!response.ok) throw new Error('Ссылка просрочена, уже использована или выдана для другого клиента')
     state = candidate
     await save(state)

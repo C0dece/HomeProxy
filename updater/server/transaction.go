@@ -185,6 +185,7 @@ func (i installation) switchRelease(pkg artifact, record updateRecord, dir strin
 	}
 	desired := record.Previous
 	desired.Version = pkg.Version
+	desired.DBSchema = pkg.DBSchema
 	if err := i.service.start(desired); err != nil {
 		return fmt.Errorf("start updated service: %w", err)
 	}
@@ -245,6 +246,24 @@ func (i installation) recover() error {
 		}
 		if err := replaceImage(restore, i.image); err != nil {
 			return fmt.Errorf("restore previous executable: %w", err)
+		}
+	}
+	savedDB := filepath.Join(i.stateDir, record.Directory, "previous.sqlite")
+	if _, statErr := os.Stat(savedDB); statErr == nil && i.config != "" {
+		if dbPath, err := configuredDatabase(i.config); err == nil && dbPath != "" {
+			for _, suffix := range []string{"", "-wal", "-shm"} {
+				_ = os.Remove(dbPath + suffix)
+			}
+			tmpDB := filepath.Join(filepath.Dir(dbPath), ".rollback-db-"+record.Directory)
+			_ = os.Remove(tmpDB)
+			if _, err := copyFile(savedDB, tmpDB); err != nil {
+				_ = os.Remove(tmpDB)
+				return fmt.Errorf("stage database rollback: %w", err)
+			}
+			if err := replaceFile(tmpDB, dbPath); err != nil {
+				_ = os.Remove(tmpDB)
+				return fmt.Errorf("restore database backup: %w", err)
+			}
 		}
 	}
 	if err := i.service.start(record.Previous); err != nil {
@@ -315,6 +334,26 @@ func fileHash(path string) (string, error) {
 func validHash(value string) bool {
 	raw, err := hex.DecodeString(value)
 	return err == nil && len(raw) == sha256.Size
+}
+
+func configuredDatabase(configPath string) (string, error) {
+	data, err := read(configPath, 64<<10)
+	if err != nil {
+		return "", err
+	}
+	var cfg struct {
+		Database string `json:"database"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(cfg.Database) == "" {
+		return "", nil
+	}
+	if filepath.IsAbs(cfg.Database) {
+		return cfg.Database, nil
+	}
+	return filepath.Join(filepath.Dir(configPath), cfg.Database), nil
 }
 
 func writeRecord(path string, record updateRecord) error {

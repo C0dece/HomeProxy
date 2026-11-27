@@ -265,7 +265,7 @@ func (s *server) proxies(q queryer, user string) ([]proxyInfo, error) {
 
 func (s *server) coreConfig(q queryer) ([]byte, error) {
 	type account struct{ uid, id, primary, direct string }
-	rows, err := q.Query("SELECT user_id,id,primary_id,direct_id FROM devices WHERE revoked=0 AND transport='agent' AND token_hash IS NOT NULL ORDER BY id")
+	rows, err := q.Query("SELECT user_id,id,primary_id,direct_id FROM devices WHERE revoked=0 AND access_enabled=1 AND (access_expires=0 OR access_expires>?) AND ((transport='agent' AND token_hash IS NOT NULL) OR sub_active=1) ORDER BY id", time.Now().Unix())
 	if err != nil {
 		return nil, err
 	}

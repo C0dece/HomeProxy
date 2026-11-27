@@ -16,6 +16,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.Callable
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
@@ -44,11 +45,14 @@ class HomeProxyVpnService : VpnService(), CommandServerHandler {
     private val secret = MobileRuntime.randomToken()
     private val probePort = MobileRuntime.port()
     private val controlPort = generateSequence { MobileRuntime.port() }.first { it != probePort }
-    private var probeUrl = ""
+    @Volatile private var probeUrl = ""
     private var candidates = JSONArray()
-    private var selected: String? = null
-    private var serverDirect = false
-    private val health = mutableMapOf<String, Int>()
+    private var hasServerDirect = false
+    @Volatile private var selected: String? = null
+    @Volatile private var manualSelected: String? = null
+    @Volatile private var serverDirect = false
+    private val health = ConcurrentHashMap<String, Int>()
+    private val latencies = ConcurrentHashMap<String, Long>()
     private val recentDomains = LinkedHashMap<String, RecentDomain>()
     private val probes = Executors.newFixedThreadPool(4)
     internal var connected = false
@@ -122,13 +126,18 @@ class HomeProxyVpnService : VpnService(), CommandServerHandler {
 
     internal fun apply(state: JSONObject) {
         val plan = MobileRuntime.plan(this, state, probePort, controlPort, secret)
-        val config = plan.getJSONObject("config").toString()
+        val configObj = plan.getJSONObject("config")
+        val config = configObj.toString()
         Libbox.checkConfig(config)
         val service = core ?: createCore()
         service.startOrReloadService(config, OverrideOptions())
         candidates = plan.getJSONArray("candidates")
-        probeUrl = state.getJSONObject("remote").getString("probeUrl")
+        val outbounds = configObj.optJSONArray("outbounds") ?: JSONArray()
+        hasServerDirect = (0 until outbounds.length()).any { outbounds.getJSONObject(it).optString("tag") == "server-direct" }
+        probeUrl = state.optJSONObject("remote")?.optString("probeUrl")?.takeIf { it.isNotEmpty() }
+            ?: "https://cp.cloudflare.com/generate_204"
         health.clear()
+        latencies.clear()
         selected = null
         connected = true
         probe()
@@ -151,20 +160,37 @@ class HomeProxyVpnService : VpnService(), CommandServerHandler {
         }
     }
 
+    internal fun selectCandidate(tag: String) {
+        val exists = (0 until candidates.length()).any { candidates.getJSONObject(it).optString("tag") == tag }
+        if (!exists) throw MobileFailure("Выходной узел не найден")
+        MobileRuntime.select(controlPort, tag, secret)
+        manualSelected = tag
+        selected = tag
+    }
+
     internal fun probe() {
         if (!connected) return
         val tags = (0 until candidates.length()).map { candidates.getJSONObject(it).getString("tag") }
-        val all = tags + "server-direct"
-        val results = probes.invokeAll(all.map { tag -> Callable { MobileRuntime.testRoute(probeUrl, probePort, tag, secret) } },
-            7, TimeUnit.SECONDS)
+        val all = if (hasServerDirect) tags + "server-direct" else tags
+        val results = probes.invokeAll(all.map { tag ->
+            Callable {
+                val started = System.nanoTime()
+                val ok = MobileRuntime.testRoute(probeUrl, probePort, tag, secret)
+                val ms = ((System.nanoTime() - started) / 1_000_000L).coerceAtLeast(1L)
+                ok to ms
+            }
+        }, 7, TimeUnit.SECONDS)
         all.zip(results).forEach { (tag, result) ->
-            val available = !result.isCancelled && result.get()
+            val pair = if (!result.isCancelled) result.get() else (false to 0L)
+            val available = pair.first
             health[tag] = if (available) minOf(2, (health[tag] ?: 0) + 1) else 0
+            if (available) latencies[tag] = pair.second else latencies.remove(tag)
         }
         serverDirect = (health["server-direct"] ?: 0) > 0
         val currentGood = (selected?.let { health[it] } ?: 0) > 0
         val minimum = if (currentGood) 2 else 1
-        val next = tags.firstOrNull { it == selected && currentGood || (health[it] ?: 0) >= minimum }
+        val manualBest = manualSelected?.takeIf { tag -> tags.contains(tag) && (health[tag] ?: 0) > 0 }
+        val next = manualBest ?: tags.firstOrNull { it == selected && currentGood || (health[it] ?: 0) >= minimum }
         if (next != selected) {
             MobileRuntime.select(controlPort, next ?: "unavailable", secret)
             selected = next
@@ -228,7 +254,10 @@ class HomeProxyVpnService : VpnService(), CommandServerHandler {
         val list = JSONArray()
         for (index in 0 until candidates.length()) {
             val entry = JSONObject(candidates.getJSONObject(index).toString())
-            list.put(entry.put("available", (health[entry.getString("tag")] ?: 0) > 0))
+            val tag = entry.getString("tag")
+            entry.put("available", (health[tag] ?: 0) > 0)
+            latencies[tag]?.let { entry.put("latencyMs", it) }
+            list.put(entry)
         }
         val primary = if (candidates.length() > 0) candidates.getJSONObject(0).getString("tag") else null
         val isFallback = selected != null && primary != null && selected != primary
@@ -239,9 +268,12 @@ class HomeProxyVpnService : VpnService(), CommandServerHandler {
     internal fun close() {
         connected = false
         candidates = JSONArray()
+        hasServerDirect = false
         selected = null
+        manualSelected = null
         serverDirect = false
         health.clear()
+        latencies.clear()
         val service = core
         core = null
         if (service != null) {

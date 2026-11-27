@@ -13,7 +13,16 @@ await build({
 })
 await Promise.all(['popup.html', 'popup.css'].map(name => copyFile(new URL(name, from), new URL(name, output))))
 const manifest = JSON.parse(await readFile(new URL('manifest.json', from), 'utf8'))
-if (process.env.HOMEPROXY_RELEASE_VERSION) manifest.version = process.env.HOMEPROXY_RELEASE_VERSION
+let releaseVersion = process.env.HOMEPROXY_RELEASE_VERSION?.trim()
+if (!releaseVersion) {
+  try {
+    releaseVersion = (await readFile(new URL('../VERSION', import.meta.url), 'utf8')).trim()
+  } catch { /* optional VERSION file */ }
+}
+if (releaseVersion) {
+  if (!/^\d+\.\d+\.\d+$/.test(releaseVersion)) throw new Error(`Invalid version: ${releaseVersion}`)
+  manifest.version = releaseVersion
+}
 if (process.env.HOMEPROXY_BROWSER_UPDATE_URL) manifest.update_url = process.env.HOMEPROXY_BROWSER_UPDATE_URL
 await writeFile(new URL('manifest.json', output), JSON.stringify(manifest, null, 2) + '\n')
 await copyFile(new URL('../packages/ui/theme.css', import.meta.url), new URL('theme.css', output))

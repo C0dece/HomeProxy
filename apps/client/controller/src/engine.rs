@@ -20,7 +20,9 @@ pub struct Engine {
     child: Option<Child>,
     installed: Option<Generated>,
     selected: Option<String>,
+    manual_selected: Option<String>,
     health: HashMap<String, u8>,
+    latencies: HashMap<String, u32>,
     direct_available: bool,
     #[cfg(windows)]
     job: windows_sys::Win32::Foundation::HANDLE,
@@ -67,7 +69,9 @@ impl Engine {
             child: None,
             installed: None,
             selected: None,
+            manual_selected: None,
             health: HashMap::new(),
+            latencies: HashMap::new(),
             direct_available: false,
             #[cfg(windows)]
             job: create_job().map_err(|_| "Не удалось подготовить Windows Job Object")?,
@@ -229,6 +233,19 @@ impl Engine {
         Ok(())
     }
 
+    pub fn select_candidate(&mut self, tag: &str) -> Result<(), String> {
+        let valid = self
+            .installed
+            .as_ref()
+            .is_some_and(|g| g.candidates.iter().any(|c| c.tag == tag));
+        if !valid {
+            return Err("Выходной узел не найден".into());
+        }
+        self.select(tag)?;
+        self.manual_selected = Some(tag.to_string());
+        Ok(())
+    }
+
     pub fn replace(
         &mut self,
         generated: Generated,
@@ -294,12 +311,14 @@ impl Engine {
         }
         self.selected = None;
         self.health.clear();
+        self.latencies.clear();
         self.direct_available = false;
     }
 
     pub fn clear(&mut self) {
         self.stop();
         self.installed = None;
+        self.manual_selected = None;
     }
 
     pub fn probe(&mut self, url: &str) -> Result<(), String> {
@@ -307,20 +326,28 @@ impl Engine {
             return Ok(());
         };
         let candidates = generated.candidates.clone();
+        let has_server_direct = generated.config["outbounds"]
+            .as_array()
+            .is_some_and(|outs| outs.iter().any(|o| o["tag"] == "server-direct"));
         let mut tags: Vec<_> = candidates.iter().map(|c| c.tag.as_str()).collect();
-        tags.push("server-direct");
+        if has_server_direct {
+            tags.push("server-direct");
+        }
         let endpoint = format!("http://127.0.0.1:{}", self.ports.probe);
         let test = |tag: &str| {
             let Ok(proxy) = reqwest::Proxy::all(&endpoint) else {
-                return false;
+                return (false, None);
             };
-            Client::builder()
+            let started = Instant::now();
+            let ok = Client::builder()
                 .proxy(proxy.basic_auth(tag, &self.token))
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(4))
                 .build()
                 .and_then(|client| client.head(url).send())
-                .is_ok_and(|r| r.status().is_success())
+                .is_ok_and(|r| r.status().is_success());
+            let latency = ok.then(|| started.elapsed().as_millis().max(1) as u32);
+            (ok, latency)
         };
         let results = std::thread::scope(|scope| {
             let tasks: Vec<_> = tags
@@ -329,29 +356,42 @@ impl Engine {
                 .collect();
             tasks
                 .into_iter()
-                .map(|(tag, job)| (tag, job.join().unwrap_or(false)))
+                .map(|(tag, job)| (tag, job.join().unwrap_or((false, None))))
                 .collect::<Vec<_>>()
         });
-        for (tag, available) in results {
+        for (tag, (available, latency)) in results {
             let count = self.health.entry(tag.to_string()).or_default();
             *count = if available {
                 count.saturating_add(1)
             } else {
                 0
             };
+            if let Some(ms) = latency {
+                self.latencies.insert(tag.to_string(), ms);
+            } else {
+                self.latencies.remove(tag);
+            }
         }
         self.direct_available = self.health.get("server-direct").copied().unwrap_or(0) > 0;
         let selected = self.selected.as_deref();
         let still_healthy =
             selected.is_some_and(|tag| self.health.get(tag).copied().unwrap_or(0) > 0);
         let minimum = if still_healthy { 2 } else { 1 };
-        let best = candidates
-            .iter()
-            .find(|c| {
-                Some(c.tag.as_str()) == selected && still_healthy
-                    || self.health.get(&c.tag).copied().unwrap_or(0) >= minimum
-            })
-            .map(|c| c.tag.as_str());
+        let manual_best = self.manual_selected.as_deref().and_then(|manual| {
+            candidates
+                .iter()
+                .find(|c| c.tag == manual && self.health.get(&c.tag).copied().unwrap_or(0) > 0)
+                .map(|c| c.tag.as_str())
+        });
+        let best = manual_best.or_else(|| {
+            candidates
+                .iter()
+                .find(|c| {
+                    Some(c.tag.as_str()) == selected && still_healthy
+                        || self.health.get(&c.tag).copied().unwrap_or(0) >= minimum
+                })
+                .map(|c| c.tag.as_str())
+        });
         if best != selected {
             self.select(best.unwrap_or("unavailable"))?;
         }
@@ -373,8 +413,12 @@ impl Engine {
             "selected": self.selected,
             "fallback": fallback,
             "serverDirectAvailable": self.direct_available,
-            "candidates": candidates.iter().map(|c| json!({"tag": c.tag, "name": c.name,
-                "available": self.health.get(&c.tag).copied().unwrap_or(0) > 0})).collect::<Vec<_>>()
+            "candidates": candidates.iter().map(|c| json!({
+                "tag": c.tag,
+                "name": c.name,
+                "available": self.health.get(&c.tag).copied().unwrap_or(0) > 0,
+                "latencyMs": self.latencies.get(&c.tag),
+            })).collect::<Vec<_>>()
         })
     }
 }

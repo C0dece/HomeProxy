@@ -30,6 +30,10 @@ if ($WindowsUpdateEndpoint -or $WindowsUpdatePublicKey) {
 }
 Push-Location (Join-Path $PSScriptRoot '..')
 try {
+    if (!$Version -and (Test-Path -LiteralPath 'VERSION')) {
+        $Version = (Get-Content -LiteralPath 'VERSION' -Raw).Trim()
+        if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid version in VERSION file: $Version" }
+    }
     $env:HOMEPROXY_WINDOWS_UPDATE_ENDPOINT = $WindowsUpdateEndpoint
     $env:HOMEPROXY_WINDOWS_UPDATE_KEY = $updatePublicKey
     if ($Version) {

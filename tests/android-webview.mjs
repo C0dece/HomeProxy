@@ -8,7 +8,12 @@ if (!app) throw new Error('HomeProxy WebView is not visible')
 
 function invoke({ command, data }) {
   if (command === 'ui-connect') {
-    const field = document.querySelector('input[type=password]')
+    let field = document.querySelector('input[type=password]')
+    if (!field) {
+      const subBtn = [...document.querySelectorAll('button')].find(item => item.textContent.includes('По подписке'))
+      subBtn?.click()
+      field = document.querySelector('input[type=password]')
+    }
     if (!(field instanceof HTMLInputElement) || !field.form) throw new Error('Pairing screen is missing')
     field.value = data.link
     field.dispatchEvent(new Event('input', { bubbles: true }))
@@ -17,92 +22,75 @@ function invoke({ command, data }) {
   }
   if (command === 'ui-text') return document.body.innerText
   if (command === 'ui-updates') {
-    const button = [...document.querySelectorAll('button')].find(item => item.textContent.trim() === 'Обновления')
-    if (!button || button.disabled) return false
-    button.click()
+    const tab = [...document.querySelectorAll('nav button')].find(item => item.textContent.includes('Настройки'))
+    if (!tab || tab.disabled) return false
+    tab.click()
     return true
   }
   if (command === 'ui-vpn-policy') {
-    const heading = [...document.querySelectorAll('h2')].find(item => item.textContent === 'Политика VPN Android')
-    const section = heading?.closest('section')
-    if (!section) return false
-    section.scrollIntoView({ block: 'center' })
-    return section.innerText
+    const tab = [...document.querySelectorAll('nav button')].find(item => item.textContent.includes('Настройки'))
+    tab?.click()
+    return document.body.innerText
   }
   if (command === 'ui-vpn-settings') {
-    const button = [...document.querySelectorAll('button')].find(item => item.textContent.trim() === 'Настройки VPN Android')
+    const tab = [...document.querySelectorAll('nav button')].find(item => item.textContent.includes('Настройки'))
+    tab?.click()
+    const button = [...document.querySelectorAll('button')].find(item => item.textContent.includes('Настройки VPN'))
     if (!button || button.disabled) return false
     button.click()
     return true
   }
   if (command === 'ui-apps') {
-    const tab = [...document.querySelectorAll('nav button')].find(item => item.textContent.trim() === 'Приложения')
+    const tab = [...document.querySelectorAll('nav button')].find(item => item.textContent.includes('Ресурсы'))
     if (!tab) return false
     tab.click()
+    const addBtn = [...document.querySelectorAll('button')].find(item => item.textContent.includes('Добавить ресурс'))
+    addBtn?.click()
     return true
   }
   if (command === 'ui-package') {
-    const items = document.querySelectorAll('.app-choice')
-    const item = [...items].find(button => button.querySelector('.mono')?.textContent === data.package)
+    const items = document.querySelectorAll('.app-pick')
+    const item = [...items].find(button => button.querySelector('.app-path')?.textContent === data.package)
     if (!item?.querySelector('img')?.naturalWidth) return false
-    const bounds = item.getBoundingClientRect()
-    const text = item.querySelector('.card-head').getBoundingClientRect()
-    if (text.top < bounds.top || text.bottom > bounds.bottom) throw new Error('Android package row text overlaps')
     item.click()
     return item.innerText
   }
   if (command === 'ui-app-search') {
-    const field = document.querySelector('input[type=search]')
+    const field = document.querySelector('dialog input[type=search]')
     if (!field) return false
     field.value = data.query
     field.dispatchEvent(new Event('input', { bubbles: true }))
     return true
   }
   if (command === 'ui-exclusions') {
-    const section = document.querySelector('[aria-label="Исключения из VPN"]')
-    if (!section) {
-      const tab = [...document.querySelectorAll('nav button')].find(item => item.textContent.trim() === 'Исключения')
-      tab?.click()
-      return ''
-    }
-    section.scrollIntoView({ block: 'center' })
-    return section.innerText
+    const tab = [...document.querySelectorAll('nav button')].find(item => item.textContent.includes('Настройки'))
+    tab?.click()
+    const details = [...document.querySelectorAll('details')].find(d => d.textContent.includes('Исключения из VPN'))
+    if (!details) return ''
+    if (!details.open) details.open = true
+    return details.innerText
   }
   if (command === 'ui-exclusion-change') {
-    const list = document.querySelector(data.excluded ? '[aria-label="Добавить исключение"]' : '[aria-label="Исключения из VPN"]')
-    const field = list?.querySelector('input[type=search]')
-    if (field && field.value !== data.package) {
-      field.value = data.package
-      field.dispatchEvent(new Event('input', { bubbles: true }))
-      return false
-    }
-    const button = [...(list?.querySelectorAll('button[data-package]') ?? [])].find(item => item.dataset.package === data.package)
+    const details = [...document.querySelectorAll('details')].find(d => d.textContent.includes('Исключения из VPN'))
+    if (details && !details.open) details.open = true
+    const button = [...(details?.querySelectorAll('button') ?? [])].find(item =>
+      item.textContent.trim() === (data.excluded ? 'Исключить' : 'Вернуть') &&
+      item.parentElement?.innerText.includes(data.package)
+    )
     if (!button || button.disabled) return false
     button.click()
     return true
   }
-  if (command === 'ui-package-save') {
-    const field = document.querySelector('input[placeholder="com.example.app"]')
-    const form = field?.form
-    const button = form?.querySelector('button.primary')
-    if (!form || !button || button.disabled || field.value !== data.package) return false
-    const [scope, route] = form.querySelectorAll('select')
-    for (const [select, value] of [[scope, data.scope], [route, data.action]]) {
-      select.value = value
-      select.dispatchEvent(new Event('change', { bubbles: true }))
-    }
-    form.requestSubmit()
-    return true
-  }
   if (command === 'ui-vpn') {
     const label = data.enabled ? 'Включить' : 'Выключить'
-    const button = [...document.querySelectorAll('button')].find(item => item.textContent.trim() === label)
+    const button = document.querySelector(`button[aria-label="${label}"]`)
     if (!button || button.disabled) return false
     button.click()
     return true
   }
   return window.__TAURI_INTERNALS__.invoke('agent_command', { command, data })
 }
+
 const socket = new WebSocket(app.webSocketDebuggerUrl)
 const result = new Promise((resolve, reject) => {
   socket.addEventListener('open', () => socket.send(JSON.stringify({

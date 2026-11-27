@@ -1,5 +1,5 @@
 param(
-    [Parameter(Mandatory)][ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version,
+    [ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version,
     [Parameter(Mandatory)][ValidatePattern('^[\w.-]+/[\w.-]+$')][string]$Repository,
     [Parameter(Mandatory)][string]$WindowsPayload,
     [Parameter(Mandatory)][string]$AndroidPayload,
@@ -13,6 +13,12 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
+$versionFile = Join-Path $PSScriptRoot '..\VERSION'
+if (!$Version) {
+    if (!(Test-Path -LiteralPath $versionFile)) { throw 'Supply -Version or create a VERSION file in the repository root.' }
+    $Version = (Get-Content -LiteralPath $versionFile -Raw).Trim()
+    if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid version in VERSION file: $Version" }
+}
 if (Test-Path -LiteralPath $OutputDirectory) { throw 'Use a new output directory.' }
 $out = (New-Item -ItemType Directory -Path $OutputDirectory).FullName
 $windows = (Resolve-Path -LiteralPath $WindowsPayload).Path
@@ -37,7 +43,7 @@ function Get-Artifact([string]$File, [string]$Component, [string]$Platform, [str
     return @{
         component = $Component; channel = 'stable'; version = $Version; platform = $Platform; arch = $Arch
         url = "$assets/$File"; size = $item.Length; sha256 = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-        apiMin = 1; apiMax = 1; dbSchema = 3; notes = $notes
+        apiMin = 1; apiMax = 1; dbSchema = 5; notes = $notes
     }
 }
 

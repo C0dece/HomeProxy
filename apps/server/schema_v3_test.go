@@ -152,8 +152,8 @@ func TestMigrateV2ToV3PreservesData(t *testing.T) {
 	defer migrated.Close()
 
 	var version int
-	if err := migrated.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 3 {
-		t.Fatalf("expected user_version=3, got %d (err=%v)", version, err)
+	if err := migrated.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != schemaVersion {
+		t.Fatalf("expected user_version=%d, got %d (err=%v)", schemaVersion, version, err)
 	}
 	var headers string
 	if err := migrated.QueryRow("SELECT headers FROM proxies WHERE id='p1'").Scan(&headers); err != nil || headers != "{}" {

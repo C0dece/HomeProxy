@@ -54,6 +54,8 @@ pub struct ServiceGroupEntry {
     pub id: String,
     pub kind: String,
     pub pattern: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -73,6 +75,30 @@ pub struct ServiceGroup {
     pub revision: u64,
     #[serde(default)]
     pub entries: Vec<ServiceGroupEntry>,
+}
+
+impl ServiceGroup {
+    pub fn validate(&mut self) -> Result<(), String> {
+        self.name = self.name.trim().to_string();
+        if self.name.is_empty() || self.name.len() > 100 {
+            return Err("Укажите название ресурса".into());
+        }
+        if self.locked && self.action == Action::Inherit {
+            return Err("Некорректный маршрут для обязательного ресурса".into());
+        }
+        if self.entries.len() > 256 {
+            return Err("Слишком много записей в ресурсе".into());
+        }
+        let mut seen = std::collections::HashSet::with_capacity(self.entries.len());
+        for entry in &mut self.entries {
+            entry.normalize()?;
+            let key = format!("{}\x00{}", entry.kind, entry.pattern);
+            if !seen.insert(key) {
+                return Err("В ресурсе есть дублирующиеся записи".into());
+            }
+        }
+        Ok(())
+    }
 }
 
 fn domain(value: &str) -> bool {
@@ -196,6 +222,8 @@ pub struct Proxy {
 pub struct Configuration {
     #[serde(default)]
     pub client_updates_paused: bool,
+    #[serde(default)]
+    pub can_edit_global: bool,
     pub api: u32,
     pub device_id: String,
     pub revision: u64,
@@ -205,6 +233,63 @@ pub struct Configuration {
     pub home: ServerEndpoint,
     pub proxies: Vec<Proxy>,
     pub probe_url: String,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct CustomProxy {
+    pub protocol: String,
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub password: String,
+    pub tls: bool,
+    pub server_name: String,
+}
+
+impl Default for CustomProxy {
+    fn default() -> Self {
+        Self {
+            protocol: "HTTP".into(),
+            host: String::new(),
+            port: 8080,
+            username: String::new(),
+            password: String::new(),
+            tls: false,
+            server_name: String::new(),
+        }
+    }
+}
+
+impl CustomProxy {
+    pub fn validate(&mut self) -> Result<(), String> {
+        self.protocol = self.protocol.trim().to_uppercase();
+        if !matches!(self.protocol.as_str(), "HTTP" | "SOCKS5" | "VLESS") {
+            return Err("Выберите протокол HTTP, SOCKS5 или VLESS".into());
+        }
+        self.host = self.host.trim().to_string();
+        if self.host.is_empty()
+            || self.host.len() > 253
+            || self
+                .host
+                .contains([' ', '\t', '\r', '\n', '/', '\\', '@', '?', '#'])
+        {
+            return Err("Укажите корректный адрес сервера".into());
+        }
+        if self.port == 0 {
+            return Err("Укажите корректный порт (1-65535)".into());
+        }
+        self.username = self.username.trim().to_string();
+        self.server_name = self.server_name.trim().to_string();
+        if self.protocol == "VLESS" {
+            if self.username.is_empty() {
+                return Err("Для VLESS укажите UUID в поле логина".into());
+            }
+        } else if !self.password.is_empty() && self.username.is_empty() {
+            return Err("Укажите логин для пароля прокси".into());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -269,7 +354,12 @@ pub(crate) fn tun_dns(profile: Profile, custom: Action) -> Value {
     })
 }
 
-pub fn effective_rules(synced: &[Rule], groups: &[ServiceGroup], local: &[Rule]) -> Vec<Rule> {
+pub fn effective_rules(
+    synced: &[Rule],
+    groups: &[ServiceGroup],
+    local_groups: &[ServiceGroup],
+    local: &[Rule],
+) -> Vec<Rule> {
     let mut rules: Vec<Rule> = synced
         .iter()
         .chain(local)
@@ -281,6 +371,9 @@ pub fn effective_rules(synced: &[Rule], groups: &[ServiceGroup], local: &[Rule])
             continue;
         }
         for entry in &group.entries {
+            if !entry.enabled {
+                continue;
+            }
             rules.push(Rule {
                 id: group.id.clone(),
                 user_id: group.user_id.clone(),
@@ -290,6 +383,26 @@ pub fn effective_rules(synced: &[Rule], groups: &[ServiceGroup], local: &[Rule])
                 enabled: true,
                 locked: group.locked,
                 revision: group.revision,
+            });
+        }
+    }
+    for group in local_groups {
+        if !group.enabled || group.action == Action::Inherit {
+            continue;
+        }
+        for entry in &group.entries {
+            if !entry.enabled {
+                continue;
+            }
+            rules.push(Rule {
+                id: String::new(),
+                user_id: String::new(),
+                kind: entry.kind.clone(),
+                pattern: entry.pattern.clone(),
+                action: group.action,
+                enabled: true,
+                locked: false,
+                revision: 0,
             });
         }
     }
@@ -420,8 +533,108 @@ pub struct Ports {
     pub listen: ProxyListen,
 }
 
+#[allow(clippy::too_many_arguments)]
+fn assemble_config(
+    mut outbounds: Vec<Value>,
+    candidates: Vec<Candidate>,
+    has_server_direct: bool,
+    ordered: Vec<Rule>,
+    profile: Profile,
+    custom: Action,
+    ports: &Ports,
+    secret: &str,
+) -> Generated {
+    let mut tags: Vec<_> = candidates.iter().map(|c| c.tag.as_str()).collect();
+    tags.push("unavailable");
+    outbounds.push(
+        json!({"type": "selector", "tag": "selected-proxy", "outbounds": tags,
+        "default": "unavailable", "interrupt_exist_connections": true}),
+    );
+    let mut users: Vec<_> = candidates
+        .iter()
+        .map(|c| json!({"username": c.tag, "password": secret}))
+        .collect();
+    if has_server_direct {
+        users.push(json!({"username": "server-direct", "password": secret}));
+    }
+    let mut apps_inbound = json!({
+        "type": "mixed",
+        "tag": "apps",
+        "listen": ports.listen.bind,
+        "listen_port": ports.listen.port
+    });
+    if !ports.listen.username.is_empty() {
+        apps_inbound["users"] = json!([{
+            "username": ports.listen.username,
+            "password": ports.listen.password
+        }]);
+    }
+    let inbounds = [
+        apps_inbound,
+        json!({"type": "mixed", "tag": "browser-proxy", "listen": "127.0.0.1", "listen_port": ports.proxy + 2}),
+        json!({"type": "mixed", "tag": "browser-direct", "listen": "127.0.0.1", "listen_port": ports.proxy + 3}),
+        json!({"type": "mixed", "tag": "browser-server", "listen": "127.0.0.1", "listen_port": ports.proxy + 4}),
+        json!({"type": "mixed", "tag": "probe", "listen": "127.0.0.1", "listen_port": ports.probe, "users": users}),
+    ];
+    let mut rules = vec![json!({"network": "udp", "action": "reject"})];
+    rules.extend(candidates.iter().map(
+        |c| json!({"inbound": "probe", "auth_user": c.tag, "action": "route", "outbound": c.tag}),
+    ));
+    if has_server_direct {
+        rules.push(json!({"inbound": "probe", "auth_user": "server-direct", "action": "route", "outbound": "server-direct"}));
+    }
+    rules.push(json!({"inbound": "probe", "action": "reject"}));
+    rules.push(json!({"action": "sniff", "timeout": "300ms"}));
+    let default = match profile {
+        Profile::DirectInternet => Action::LocalDirect,
+        Profile::Custom => custom,
+        _ => Action::Proxy,
+    };
+    let route_rule = |rule: &Rule| {
+        let mut entry = route(rule.action, default);
+        match rule.kind.as_str() {
+            "domain" => entry["domain"] = json!([rule.pattern]),
+            "suffix" => entry["domain_suffix"] = json!([rule.pattern]),
+            "ip_cidr" => entry["ip_cidr"] = json!([rule.pattern]),
+            "process" => entry["process_path_regex"] = json!([process_pattern(&rule.pattern)]),
+            "package" => entry["package_name"] = json!([rule.pattern]),
+            _ => return None,
+        }
+        Some(entry)
+    };
+    rules.extend(ordered.iter().filter(|r| r.locked).filter_map(route_rule));
+    for (inbound, action) in [
+        ("browser-proxy", Action::Proxy),
+        ("browser-direct", Action::LocalDirect),
+        (
+            "browser-server",
+            if has_server_direct {
+                Action::ServerDirect
+            } else {
+                Action::LocalDirect
+            },
+        ),
+    ] {
+        let mut entry = route(action, default);
+        entry["inbound"] = json!(inbound);
+        rules.push(entry);
+    }
+    rules.extend(ordered.iter().filter(|r| !r.locked).filter_map(route_rule));
+    rules.push(route(default, Action::Proxy));
+    let config = json!({
+        "log": {"disabled": true},
+        "inbounds": inbounds,
+        "outbounds": outbounds,
+        "dns": {"servers": [{"type": "local", "tag": "system"}]},
+        "route": {"rules": rules, "default_domain_resolver": "system"},
+        "experimental": {"clash_api": {"external_controller": format!("127.0.0.1:{}", ports.control), "secret": secret}}
+    });
+    Generated { config, candidates }
+}
+
 pub fn generate(
     remote: &Configuration,
+    local_groups: &[ServiceGroup],
     local: &[Rule],
     profile: Profile,
     custom: Action,
@@ -459,82 +672,92 @@ pub fn generate(
             name: "HomeProxy Server".into(),
         });
     }
-    let mut tags: Vec<_> = candidates.iter().map(|c| c.tag.as_str()).collect();
-    tags.push("unavailable");
-    outbounds.push(
-        json!({"type": "selector", "tag": "selected-proxy", "outbounds": tags,
-        "default": "unavailable", "interrupt_exist_connections": true}),
-    );
-    let mut users: Vec<_> = candidates
-        .iter()
-        .map(|c| json!({"username": c.tag, "password": secret}))
-        .collect();
-    users.push(json!({"username": "server-direct", "password": secret}));
-    let mut apps_inbound = json!({
-        "type": "mixed",
-        "tag": "apps",
-        "listen": ports.listen.bind,
-        "listen_port": ports.listen.port
-    });
-    if !ports.listen.username.is_empty() {
-        apps_inbound["users"] = json!([{
-            "username": ports.listen.username,
-            "password": ports.listen.password
-        }]);
-    }
-    let inbounds = [
-        apps_inbound,
-        json!({"type": "mixed", "tag": "browser-proxy", "listen": "127.0.0.1", "listen_port": ports.proxy + 2}),
-        json!({"type": "mixed", "tag": "browser-direct", "listen": "127.0.0.1", "listen_port": ports.proxy + 3}),
-        json!({"type": "mixed", "tag": "browser-server", "listen": "127.0.0.1", "listen_port": ports.proxy + 4}),
-        json!({"type": "mixed", "tag": "probe", "listen": "127.0.0.1", "listen_port": ports.probe, "users": users}),
-    ];
-    let mut rules = vec![json!({"network": "udp", "action": "reject"})];
-    rules.extend(candidates.iter().map(
-        |c| json!({"inbound": "probe", "auth_user": c.tag, "action": "route", "outbound": c.tag}),
-    ));
-    rules.push(json!({"inbound": "probe", "auth_user": "server-direct", "action": "route", "outbound": "server-direct"}));
-    rules.push(json!({"inbound": "probe", "action": "reject"}));
-    rules.push(json!({"action": "sniff", "timeout": "300ms"}));
-    let default = match profile {
-        Profile::DirectInternet => Action::LocalDirect,
-        Profile::Custom => custom,
-        _ => Action::Proxy,
-    };
-    let ordered = effective_rules(&remote.rules, &remote.groups, local);
-    let route_rule = |rule: &Rule| {
-        let mut entry = route(rule.action, default);
-        match rule.kind.as_str() {
-            "domain" => entry["domain"] = json!([rule.pattern]),
-            "suffix" => entry["domain_suffix"] = json!([rule.pattern]),
-            "ip_cidr" => entry["ip_cidr"] = json!([rule.pattern]),
-            "process" => entry["process_path_regex"] = json!([process_pattern(&rule.pattern)]),
-            "package" => entry["package_name"] = json!([rule.pattern]),
-            _ => return None,
+    let ordered = effective_rules(&remote.rules, &remote.groups, local_groups, local);
+    assemble_config(
+        outbounds, candidates, true, ordered, profile, custom, ports, secret,
+    )
+}
+
+pub fn generate_custom(
+    custom_proxy: &CustomProxy,
+    local_groups: &[ServiceGroup],
+    local: &[Rule],
+    profile: Profile,
+    custom: Action,
+    ports: &Ports,
+    secret: &str,
+) -> Generated {
+    let tag = "custom-0".to_string();
+    let proto = custom_proxy.protocol.to_uppercase();
+    let mut outbound = match proto.as_str() {
+        "SOCKS5" => {
+            let mut obj = json!({
+                "type": "socks",
+                "tag": tag,
+                "server": custom_proxy.host,
+                "server_port": custom_proxy.port,
+                "version": "5"
+            });
+            if !custom_proxy.username.is_empty() {
+                obj["username"] = json!(custom_proxy.username);
+                obj["password"] = json!(custom_proxy.password);
+            }
+            obj
         }
-        Some(entry)
+        "VLESS" => {
+            let mut obj = json!({
+                "type": "vless",
+                "tag": tag,
+                "server": custom_proxy.host,
+                "server_port": custom_proxy.port,
+                "uuid": custom_proxy.username
+            });
+            if custom_proxy.tls || !custom_proxy.server_name.is_empty() {
+                let sni = if custom_proxy.server_name.is_empty() {
+                    &custom_proxy.host
+                } else {
+                    &custom_proxy.server_name
+                };
+                obj["tls"] = json!({"enabled": true, "server_name": sni});
+            }
+            obj
+        }
+        _ => {
+            let mut obj = json!({
+                "type": "http",
+                "tag": tag,
+                "server": custom_proxy.host,
+                "server_port": custom_proxy.port
+            });
+            if !custom_proxy.username.is_empty() {
+                obj["username"] = json!(custom_proxy.username);
+                obj["password"] = json!(custom_proxy.password);
+            }
+            if custom_proxy.tls {
+                let sni = if custom_proxy.server_name.is_empty() {
+                    &custom_proxy.host
+                } else {
+                    &custom_proxy.server_name
+                };
+                obj["tls"] = json!({"enabled": true, "server_name": sni});
+            }
+            obj
+        }
     };
-    rules.extend(ordered.iter().filter(|r| r.locked).filter_map(route_rule));
-    for (inbound, action) in [
-        ("browser-proxy", Action::Proxy),
-        ("browser-direct", Action::LocalDirect),
-        ("browser-server", Action::ServerDirect),
-    ] {
-        let mut entry = route(action, default);
-        entry["inbound"] = json!(inbound);
-        rules.push(entry);
-    }
-    rules.extend(ordered.iter().filter(|r| !r.locked).filter_map(route_rule));
-    rules.push(route(default, Action::Proxy));
-    let config = json!({
-        "log": {"disabled": true},
-        "inbounds": inbounds,
-        "outbounds": outbounds,
-        "dns": {"servers": [{"type": "local", "tag": "system"}]},
-        "route": {"rules": rules, "default_domain_resolver": "system"},
-        "experimental": {"clash_api": {"external_controller": format!("127.0.0.1:{}", ports.control), "secret": secret}}
-    });
-    Generated { config, candidates }
+    let _ = &mut outbound;
+    let outbounds = vec![
+        json!({"type": "direct", "tag": "local-direct"}),
+        json!({"type": "block", "tag": "unavailable"}),
+        outbound,
+    ];
+    let candidates = vec![Candidate {
+        tag,
+        name: format!("{}:{} ({})", custom_proxy.host, custom_proxy.port, proto),
+    }];
+    let ordered = effective_rules(&[], &[], local_groups, local);
+    assemble_config(
+        outbounds, candidates, false, ordered, profile, custom, ports, secret,
+    )
 }
 
 #[cfg(test)]
@@ -550,6 +773,7 @@ mod tests {
         headers.insert("X-Proxy-Auth".into(), "secret".into());
         let remote = Configuration {
             client_updates_paused: false,
+            can_edit_global: false,
             api: 1,
             device_id: "dev1".into(),
             revision: 1,
@@ -577,16 +801,25 @@ mod tests {
                             id: "e1".into(),
                             kind: "domain".into(),
                             pattern: "chatgpt.com".into(),
+                            enabled: true,
                         },
                         ServiceGroupEntry {
                             id: "e2".into(),
                             kind: "ip_cidr".into(),
                             pattern: "104.18.0.0/16".into(),
+                            enabled: true,
                         },
                         ServiceGroupEntry {
                             id: "e3".into(),
                             kind: "process".into(),
                             pattern: "chatgpt.exe".into(),
+                            enabled: true,
+                        },
+                        ServiceGroupEntry {
+                            id: "e3b".into(),
+                            kind: "domain".into(),
+                            pattern: "entry-off.example".into(),
+                            enabled: false,
                         },
                     ],
                 },
@@ -602,6 +835,7 @@ mod tests {
                         id: "e4".into(),
                         kind: "domain".into(),
                         pattern: "ignored.example".into(),
+                        enabled: true,
                     }],
                 },
             ],
@@ -628,6 +862,7 @@ mod tests {
         };
         let generated = generate(
             &remote,
+            &[],
             &[],
             Profile::Auto,
             Action::Proxy,
@@ -668,7 +903,8 @@ mod tests {
         assert!(!route_rules
             .iter()
             .any(|r| r["domain"] == json!(["disabled.example"])
-                || r["domain"] == json!(["ignored.example"])));
+                || r["domain"] == json!(["ignored.example"])
+                || r["domain"] == json!(["entry-off.example"])));
 
         let binary = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../.tools/sing-box-1.14.4-windows-amd64/sing-box.exe");
@@ -705,6 +941,7 @@ mod tests {
         listen.validate().unwrap();
         let remote = Configuration {
             client_updates_paused: false,
+            can_edit_global: false,
             api: 1,
             device_id: "dev1".into(),
             revision: 1,
@@ -724,6 +961,7 @@ mod tests {
         };
         let generated = generate(
             &remote,
+            &[],
             &[],
             Profile::Auto,
             Action::Proxy,
@@ -762,6 +1000,84 @@ mod tests {
                 "{}",
                 String::from_utf8_lossy(&result.stderr)
             );
+        }
+    }
+
+    #[test]
+    fn custom_proxy_supports_http_socks5_vless_and_local_groups() {
+        let local_group = ServiceGroup {
+            id: "lg1".into(),
+            name: "LocalApp".into(),
+            user_id: String::new(),
+            action: Action::Proxy,
+            enabled: true,
+            locked: false,
+            revision: 0,
+            entries: vec![ServiceGroupEntry {
+                id: "le1".into(),
+                kind: "domain".into(),
+                pattern: "local-group.example".into(),
+                enabled: true,
+            }],
+        };
+        let ports = Ports {
+            proxy: 17770,
+            probe: 17775,
+            control: 17776,
+            listen: ProxyListen::default(),
+        };
+        let binary = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../.tools/sing-box-1.14.4-windows-amd64/sing-box.exe");
+        for (proto, user, tls) in [
+            ("HTTP", "alice", false),
+            ("SOCKS5", "alice", false),
+            ("VLESS", "11111111-1111-1111-1111-111111111111", true),
+        ] {
+            let mut cp = CustomProxy {
+                protocol: proto.into(),
+                host: "proxy.example.com".into(),
+                port: 8443,
+                username: user.into(),
+                password: "secret".into(),
+                tls,
+                server_name: String::new(),
+            };
+            cp.validate().unwrap();
+            let generated = generate_custom(
+                &cp,
+                std::slice::from_ref(&local_group),
+                &[],
+                Profile::DirectInternet,
+                Action::Proxy,
+                &ports,
+                "secret",
+            );
+            assert_eq!(generated.candidates.len(), 1);
+            assert_eq!(generated.candidates[0].tag, "custom-0");
+            let route_rules = generated.config["route"]["rules"].as_array().unwrap();
+            assert!(route_rules
+                .iter()
+                .any(|r| r["domain"] == json!(["local-group.example"])));
+            if cfg!(windows) && binary.exists() {
+                let mut child = Command::new(&binary)
+                    .args(["check", "-c", "stdin"])
+                    .stdin(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                child
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(generated.config.to_string().as_bytes())
+                    .unwrap();
+                let result = child.wait_with_output().unwrap();
+                assert!(
+                    result.status.success(),
+                    "{proto}: {}",
+                    String::from_utf8_lossy(&result.stderr)
+                );
+            }
         }
     }
 }

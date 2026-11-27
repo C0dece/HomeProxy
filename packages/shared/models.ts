@@ -1,6 +1,22 @@
 export type Action = 'PROXY' | 'AUTO' | 'LOCAL_DIRECT' | 'SERVER_DIRECT' | 'BLOCK' | 'INHERIT'
 export type Profile = 'AUTO' | 'HOME_SERVER' | 'DIRECT_HTTP' | 'DIRECT_INTERNET' | 'CUSTOM'
 export type RuleKind = 'domain' | 'suffix' | 'ip_cidr' | 'process' | 'package'
+export type RoutingMode = 'off' | 'auto' | 'all'
+export type AutoBaseRoute = 'direct' | 'proxy'
+export type ConfigMode = 'subscription' | 'custom'
+export type CustomProxyProtocol = 'HTTP' | 'SOCKS5' | 'VLESS'
+
+export type CustomProxy = {
+  protocol: CustomProxyProtocol
+  host: string
+  port: number
+  username: string
+  password?: string
+  hasPassword?: boolean
+  tls?: boolean
+  serverName?: string
+}
+
 export type Rule = {
   id?: string
   userId?: string
@@ -11,11 +27,14 @@ export type Rule = {
   locked?: boolean
   revision?: number
 }
+
 export type ServiceGroupEntry = {
   id?: string
   kind: RuleKind
   pattern: string
+  enabled?: boolean
 }
+
 export type ServiceGroup = {
   id?: string
   name: string

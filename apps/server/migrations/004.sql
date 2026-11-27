@@ -1,0 +1,10 @@
+ALTER TABLE users ADD COLUMN can_edit_global INTEGER NOT NULL DEFAULT 0 CHECK(can_edit_global IN (0,1));
+ALTER TABLE service_group_entries ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1));
+ALTER TABLE devices ADD COLUMN universal INTEGER NOT NULL DEFAULT 0 CHECK(universal IN (0,1));
+ALTER TABLE devices ADD COLUMN can_edit_global INTEGER NOT NULL DEFAULT 0 CHECK(can_edit_global IN (0,1));
+ALTER TABLE devices ADD COLUMN link_type TEXT NOT NULL DEFAULT 'temp' CHECK(link_type IN ('permanent','temp'));
+ALTER TABLE devices ADD COLUMN link_duration_sec INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE devices ADD COLUMN access_expires INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE devices ADD COLUMN access_enabled INTEGER NOT NULL DEFAULT 1 CHECK(access_enabled IN (0,1));
+ALTER TABLE devices ADD COLUMN closed_reason TEXT NOT NULL DEFAULT '';
+ALTER TABLE devices ADD COLUMN closed_at INTEGER NOT NULL DEFAULT 0;

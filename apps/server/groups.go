@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/netip"
@@ -12,6 +13,29 @@ type serviceGroupEntry struct {
 	ID      string `json:"id,omitempty"`
 	Kind    string `json:"kind"`
 	Pattern string `json:"pattern"`
+	Enabled bool   `json:"enabled"`
+}
+
+func (e *serviceGroupEntry) UnmarshalJSON(data []byte) error {
+	type alias struct {
+		ID      string `json:"id,omitempty"`
+		Kind    string `json:"kind"`
+		Pattern string `json:"pattern"`
+		Enabled *bool  `json:"enabled"`
+	}
+	var raw alias
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	e.ID = raw.ID
+	e.Kind = raw.Kind
+	e.Pattern = raw.Pattern
+	if raw.Enabled != nil {
+		e.Enabled = *raw.Enabled
+	} else {
+		e.Enabled = true
+	}
+	return nil
 }
 
 type serviceGroup struct {
@@ -117,19 +141,20 @@ func listGroups(q queryer, user string, all bool, onlyEnabled bool) ([]serviceGr
 	if len(groups) == 0 {
 		return groups, nil
 	}
-	entryRows, err := q.Query(`SELECT id,group_id,kind,pattern FROM service_group_entries ORDER BY kind,pattern`)
+	entryRows, err := q.Query(`SELECT id,group_id,kind,pattern,enabled FROM service_group_entries ORDER BY kind,pattern`)
 	if err != nil {
 		return nil, err
 	}
 	defer entryRows.Close()
 	for entryRows.Next() {
 		var id, groupID, kind, pattern string
-		if err := entryRows.Scan(&id, &groupID, &kind, &pattern); err != nil {
+		var enabled bool
+		if err := entryRows.Scan(&id, &groupID, &kind, &pattern, &enabled); err != nil {
 			return nil, err
 		}
 		if pos, ok := index[groupID]; ok {
 			groups[pos].Entries = append(groups[pos].Entries, serviceGroupEntry{
-				ID: id, Kind: kind, Pattern: pattern,
+				ID: id, Kind: kind, Pattern: pattern, Enabled: enabled,
 			})
 		}
 	}
@@ -164,6 +189,62 @@ func filterGroupEntries(groups []serviceGroup, transport string, android bool) [
 	return out
 }
 
+func saveGroupTx(tx *sql.Tx, rev int64, g *serviceGroup, clientMode bool, clientUserID string) error {
+	if g.UserID != "" {
+		if err := ensure(tx, "SELECT 1 FROM users WHERE id=?", g.UserID); err != nil {
+			return err
+		}
+	}
+	exists := ensure(tx, "SELECT 1 FROM service_groups WHERE name=? AND id<>?", g.Name, g.ID)
+	if !errors.Is(exists, sql.ErrNoRows) {
+		if exists != nil {
+			return exists
+		}
+		return apiError{409, "name_taken"}
+	}
+	if g.ID != "" {
+		var current int64
+		var existingUserID string
+		var existingLocked bool
+		err := tx.QueryRow("SELECT revision,COALESCE(user_id,''),locked FROM service_groups WHERE id=?", g.ID).
+			Scan(&current, &existingUserID, &existingLocked)
+		if err != nil {
+			return err
+		}
+		if clientMode && (existingLocked || (existingUserID != "" && existingUserID != clientUserID)) {
+			return apiError{403, "forbidden_group"}
+		}
+		if g.Revision != current {
+			return apiError{409, "group_conflict"}
+		}
+		if _, err := tx.Exec(`UPDATE service_groups SET name=?,user_id=NULLIF(?,''),action=?,enabled=?,locked=?,revision=? WHERE id=?`,
+			g.Name, g.UserID, g.Action, g.Enabled, g.Locked, rev, g.ID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec("DELETE FROM service_group_entries WHERE group_id=?", g.ID); err != nil {
+			return err
+		}
+	} else {
+		if g.Revision != 0 {
+			return apiError{409, "group_conflict"}
+		}
+		g.ID = uuid()
+		if _, err := tx.Exec(`INSERT INTO service_groups(id,name,user_id,action,enabled,locked,revision)
+			VALUES(?,?,NULLIF(?,''),?,?,?,?)`, g.ID, g.Name, g.UserID, g.Action, g.Enabled, g.Locked, rev); err != nil {
+			return err
+		}
+	}
+	for i := range g.Entries {
+		g.Entries[i].ID = uuid()
+		if _, err := tx.Exec(`INSERT INTO service_group_entries(id,group_id,kind,pattern,enabled) VALUES(?,?,?,?,?)`,
+			g.Entries[i].ID, g.ID, g.Entries[i].Kind, g.Entries[i].Pattern, g.Entries[i].Enabled); err != nil {
+			return err
+		}
+	}
+	g.Revision = rev
+	return nil
+}
+
 func (s *server) saveGroup(w http.ResponseWriter, r *http.Request) {
 	g := serviceGroup{Enabled: true}
 	if !decode(w, r, &g) {
@@ -174,53 +255,31 @@ func (s *server) saveGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err := s.mutate("group.saved", false, func(tx *sql.Tx, rev int64) error {
-		if g.UserID != "" {
-			if err := ensure(tx, "SELECT 1 FROM users WHERE id=?", g.UserID); err != nil {
-				return err
-			}
+		return saveGroupTx(tx, rev, &g, false, "")
+	})
+	if !report(w, err) {
+		send(w, 200, g)
+	}
+}
+
+func (s *server) clientSaveGroup(w http.ResponseWriter, r *http.Request) {
+	g := serviceGroup{Enabled: true}
+	if !decode(w, r, &g) {
+		return
+	}
+	if !g.validate() {
+		fail(w, 400, "invalid_group")
+		return
+	}
+	err := s.mutate("group.saved", false, func(tx *sql.Tx, rev int64) error {
+		d, err := identity(tx, r)
+		if err != nil {
+			return err
 		}
-		exists := ensure(tx, "SELECT 1 FROM service_groups WHERE name=? AND id<>?", g.Name, g.ID)
-		if !errors.Is(exists, sql.ErrNoRows) {
-			if exists != nil {
-				return exists
-			}
-			return apiError{409, "name_taken"}
+		if !d.canEditGlobal || g.Locked || (g.UserID != "" && g.UserID != d.userID) {
+			return apiError{403, "forbidden_group"}
 		}
-		if g.ID != "" {
-			var current int64
-			err := tx.QueryRow("SELECT revision FROM service_groups WHERE id=?", g.ID).Scan(&current)
-			if err != nil {
-				return err
-			}
-			if g.Revision != current {
-				return apiError{409, "group_conflict"}
-			}
-			if _, err := tx.Exec(`UPDATE service_groups SET name=?,user_id=NULLIF(?,''),action=?,enabled=?,locked=?,revision=? WHERE id=?`,
-				g.Name, g.UserID, g.Action, g.Enabled, g.Locked, rev, g.ID); err != nil {
-				return err
-			}
-			if _, err := tx.Exec("DELETE FROM service_group_entries WHERE group_id=?", g.ID); err != nil {
-				return err
-			}
-		} else {
-			if g.Revision != 0 {
-				return apiError{409, "group_conflict"}
-			}
-			g.ID = uuid()
-			if _, err := tx.Exec(`INSERT INTO service_groups(id,name,user_id,action,enabled,locked,revision)
-				VALUES(?,?,NULLIF(?,''),?,?,?,?)`, g.ID, g.Name, g.UserID, g.Action, g.Enabled, g.Locked, rev); err != nil {
-				return err
-			}
-		}
-		for i := range g.Entries {
-			g.Entries[i].ID = uuid()
-			if _, err := tx.Exec(`INSERT INTO service_group_entries(id,group_id,kind,pattern) VALUES(?,?,?,?)`,
-				g.Entries[i].ID, g.ID, g.Entries[i].Kind, g.Entries[i].Pattern); err != nil {
-				return err
-			}
-		}
-		g.Revision = rev
-		return nil
+		return saveGroupTx(tx, rev, &g, true, d.userID)
 	})
 	if !report(w, err) {
 		send(w, 200, g)
@@ -230,6 +289,31 @@ func (s *server) saveGroup(w http.ResponseWriter, r *http.Request) {
 func (s *server) deleteGroup(w http.ResponseWriter, r *http.Request) {
 	err := s.mutate("group.deleted", false, func(tx *sql.Tx, _ int64) error {
 		return affected(tx.Exec("DELETE FROM service_groups WHERE id=?", r.PathValue("id")))
+	})
+	if !report(w, err) {
+		w.WriteHeader(204)
+	}
+}
+
+func (s *server) clientDeleteGroup(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	err := s.mutate("group.deleted", false, func(tx *sql.Tx, _ int64) error {
+		d, err := identity(tx, r)
+		if err != nil {
+			return err
+		}
+		if !d.canEditGlobal {
+			return apiError{403, "forbidden_group"}
+		}
+		var userID string
+		var locked bool
+		if err := tx.QueryRow("SELECT COALESCE(user_id,''),locked FROM service_groups WHERE id=?", id).Scan(&userID, &locked); err != nil {
+			return err
+		}
+		if locked || (userID != "" && userID != d.userID) {
+			return apiError{403, "forbidden_group"}
+		}
+		return affected(tx.Exec("DELETE FROM service_groups WHERE id=?", id))
 	})
 	if !report(w, err) {
 		w.WriteHeader(204)

@@ -108,7 +108,10 @@ func affected(r sql.Result, err error) error {
 }
 
 func (s *server) user(w http.ResponseWriter, r *http.Request) {
-	var input struct{ Name string }
+	var input struct {
+		Name          string
+		CanEditGlobal *bool
+	}
 	if !decode(w, r, &input) {
 		return
 	}
@@ -123,6 +126,10 @@ func (s *server) user(w http.ResponseWriter, r *http.Request) {
 		event = "user.created"
 		id = uuid()
 	}
+	var canEditGlobal bool
+	if input.CanEditGlobal != nil {
+		canEditGlobal = *input.CanEditGlobal
+	}
 	err := s.mutate(event, false, func(tx *sql.Tx, _ int64) error {
 		exists := ensure(tx, "SELECT 1 FROM users WHERE name=? AND id<>?", input.Name, id)
 		if !errors.Is(exists, sql.ErrNoRows) {
@@ -132,9 +139,16 @@ func (s *server) user(w http.ResponseWriter, r *http.Request) {
 			return apiError{409, "name_taken"}
 		}
 		if event == "user.updated" {
-			return affected(tx.Exec("UPDATE users SET name=? WHERE id=?", input.Name, id))
+			if input.CanEditGlobal != nil {
+				return affected(tx.Exec("UPDATE users SET name=?,can_edit_global=? WHERE id=?", input.Name, canEditGlobal, id))
+			}
+			err := affected(tx.Exec("UPDATE users SET name=? WHERE id=?", input.Name, id))
+			if err != nil {
+				return err
+			}
+			return tx.QueryRow("SELECT can_edit_global=1 FROM users WHERE id=?", id).Scan(&canEditGlobal)
 		}
-		_, err := tx.Exec("INSERT INTO users(id,name) VALUES(?,?)", id, input.Name)
+		_, err := tx.Exec("INSERT INTO users(id,name,can_edit_global) VALUES(?,?,?)", id, input.Name, canEditGlobal)
 		return err
 	})
 	if !report(w, err) {
@@ -142,7 +156,23 @@ func (s *server) user(w http.ResponseWriter, r *http.Request) {
 		if event == "user.created" {
 			status = http.StatusCreated
 		}
-		send(w, status, obj{"id": id, "name": input.Name})
+		send(w, status, obj{"id": id, "name": input.Name, "canEditGlobal": canEditGlobal})
+	}
+}
+
+func (s *server) userPermissions(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		CanEditGlobal bool
+	}
+	if !decode(w, r, &input) {
+		return
+	}
+	id := r.PathValue("id")
+	err := s.mutate("user.permissions", false, func(tx *sql.Tx, _ int64) error {
+		return affected(tx.Exec("UPDATE users SET can_edit_global=? WHERE id=?", input.CanEditGlobal, id))
+	})
+	if !report(w, err) {
+		send(w, 200, obj{"id": id, "canEditGlobal": input.CanEditGlobal})
 	}
 }
 
@@ -322,34 +352,98 @@ func (s *server) routes(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) invite(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		UserID, Label, Transport string
-		Minutes                  int
+		UserID, Label, Transport, LinkType string
+		Minutes, DurationMinutes           int
+		CanEditGlobal, Universal           bool
 	}
 	if !decode(w, r, &input) {
 		return
 	}
 	input.Label = strings.TrimSpace(input.Label)
-	if input.Minutes == 0 {
-		input.Minutes = 15
-	}
-	if input.Label == "" || len(input.Label) > 100 || input.Minutes < 1 || input.Minutes > 60 ||
-		(input.Transport != "agent" && input.Transport != "browser") {
+	if input.Label == "" || len(input.Label) > 100 {
 		fail(w, 400, "invalid_invite")
 		return
 	}
-	id, token := uuid(), randomToken()
-	expiry := time.Now().Add(time.Duration(input.Minutes) * time.Minute).Unix()
+	isUniversal := input.Universal || input.Transport == "" || input.Transport == "universal"
+	transport := input.Transport
+	if isUniversal {
+		transport = "agent"
+	} else if transport != "agent" && transport != "browser" {
+		fail(w, 400, "invalid_invite")
+		return
+	}
+	now := time.Now().Unix()
+	linkType := input.LinkType
+	var expiry, accessExpires, durationSec int64
+	switch linkType {
+	case "permanent":
+		expiry = 0
+		accessExpires = 0
+		durationSec = 0
+	case "temp":
+		mins := input.DurationMinutes
+		if mins == 0 {
+			mins = input.Minutes
+		}
+		if mins < 1 || mins > 525600 {
+			fail(w, 400, "invalid_invite")
+			return
+		}
+		durationSec = int64(mins) * 60
+		accessExpires = now + durationSec
+		expiry = now + max(int64(15*60), durationSec)
+	case "":
+		linkType = "temp"
+		if input.Minutes == 0 {
+			input.Minutes = 15
+		}
+		if input.Minutes < 1 || input.Minutes > 60 {
+			fail(w, 400, "invalid_invite")
+			return
+		}
+		expiry = now + int64(input.Minutes)*60
+	default:
+		fail(w, 400, "invalid_invite")
+		return
+	}
+	id, token, subToken := uuid(), randomToken(), randomToken()
+	subEnc := s.secrets.Seal(nil, nil, []byte(subToken), []byte(id))
 	err := s.mutate("device.invited", false, func(tx *sql.Tx, _ int64) error {
-		if err := ensure(tx, "SELECT 1 FROM users WHERE id=?", input.UserID); err != nil {
+		userID := input.UserID
+		if userID == "" {
+			err := tx.QueryRow("SELECT id FROM users ORDER BY name LIMIT 1").Scan(&userID)
+			if errors.Is(err, sql.ErrNoRows) {
+				userID = uuid()
+				if _, err := tx.Exec("INSERT INTO users(id,name,can_edit_global) VALUES(?,'Основной',0)", userID); err != nil {
+					return err
+				}
+			} else if err != nil {
+				return err
+			}
+		} else if err := ensure(tx, "SELECT 1 FROM users WHERE id=?", userID); err != nil {
 			return err
 		}
-		_, err := tx.Exec(`INSERT INTO devices(id,user_id,label,transport,invite_hash,expires,primary_id,direct_id)
-			VALUES(?,?,?,?,?,?,?,?)`, id, input.UserID, input.Label, input.Transport, digest(token), expiry, uuid(), uuid())
+		_, err := tx.Exec(`INSERT INTO devices(id,user_id,label,transport,invite_hash,expires,primary_id,direct_id,universal,can_edit_global,link_type,link_duration_sec,access_expires,access_enabled,sub_token_hash,sub_token_enc)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)`, id, userID, input.Label, transport, digest(token), expiry, uuid(), uuid(), isUniversal, input.CanEditGlobal, linkType, durationSec, accessExpires, digest(subToken), subEnc)
 		return err
 	})
 	if !report(w, err) {
-		send(w, 201, obj{"id": id, "link": strings.TrimRight(s.cfg.PublicURL, "/") + "/connect#" + token, "expires": expiry})
+		send(w, 201, obj{
+			"id":            id,
+			"link":          strings.TrimRight(s.cfg.PublicURL, "/") + "/connect#" + token,
+			"subUrl":        s.subURL(subToken),
+			"expires":       expiry,
+			"accessExpires": accessExpires,
+			"linkType":      linkType,
+		})
 	}
+}
+
+func (s *server) subURL(token string) string {
+	if token == "" {
+		return ""
+	}
+	return strings.TrimRight(s.cfg.PublicURL, "/") + "/api/sub/singbox?token=" + url.QueryEscape(token)
 }
 
 func (s *server) connect(w http.ResponseWriter, r *http.Request) {
@@ -368,15 +462,15 @@ func (s *server) connect(w http.ResponseWriter, r *http.Request) {
 	}
 	var id string
 	err := s.mutate("device.connected", in.Transport == "agent", func(tx *sql.Tx, _ int64) error {
-		err := tx.QueryRow(`SELECT id FROM devices WHERE invite_hash=? AND transport=? AND revoked=0
-			AND token_hash IS NULL AND expires>?`, digest(in.Token), in.Transport, time.Now().Unix()).Scan(&id)
+		err := tx.QueryRow(`SELECT id FROM devices WHERE invite_hash=? AND (transport=? OR universal=1) AND revoked=0
+			AND access_enabled=1 AND token_hash IS NULL AND (expires=0 OR expires>?)`, digest(in.Token), in.Transport, time.Now().Unix()).Scan(&id)
 		if errors.Is(err, sql.ErrNoRows) {
 			return apiError{401, "invalid_or_expired_link"}
 		}
 		if err != nil {
 			return err
 		}
-		_, err = tx.Exec("UPDATE devices SET invite_hash=NULL,token_hash=?,seen=? WHERE id=?", digest(in.DeviceKey), time.Now().Unix(), id)
+		_, err = tx.Exec("UPDATE devices SET transport=?,universal=0,invite_hash=NULL,token_hash=?,seen=? WHERE id=?", in.Transport, digest(in.DeviceKey), time.Now().Unix(), id)
 		return err
 	})
 	if !report(w, err) {
@@ -384,7 +478,10 @@ func (s *server) connect(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-type device struct{ id, userID, transport, primary, direct string }
+type device struct {
+	id, userID, transport, primary, direct string
+	canEditGlobal                          bool
+}
 
 func identity(q queryer, r *http.Request) (device, error) {
 	var d device
@@ -392,8 +489,10 @@ func identity(q queryer, r *http.Request) (device, error) {
 	if token == "" {
 		return d, apiError{401, "device_unauthorized"}
 	}
-	err := q.QueryRow("SELECT id,user_id,transport,primary_id,direct_id FROM devices WHERE token_hash=? AND revoked=0",
-		digest(token)).Scan(&d.id, &d.userID, &d.transport, &d.primary, &d.direct)
+	err := q.QueryRow(`SELECT d.id,d.user_id,d.transport,d.primary_id,d.direct_id,(d.can_edit_global=1 OR u.can_edit_global=1)
+		FROM devices d JOIN users u ON u.id=d.user_id
+		WHERE d.token_hash=? AND d.revoked=0 AND d.access_enabled=1 AND (d.access_expires=0 OR d.access_expires>?)`,
+		digest(token), time.Now().Unix()).Scan(&d.id, &d.userID, &d.transport, &d.primary, &d.direct, &d.canEditGlobal)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = apiError{401, "device_unauthorized"}
 	}
@@ -402,7 +501,65 @@ func identity(q queryer, r *http.Request) (device, error) {
 
 func (s *server) revoke(w http.ResponseWriter, r *http.Request) {
 	err := s.mutate("device.revoked", true, func(tx *sql.Tx, _ int64) error {
-		return affected(tx.Exec("UPDATE devices SET revoked=1,invite_hash=NULL,token_hash=NULL WHERE id=? AND revoked=0", r.PathValue("id")))
+		return affected(tx.Exec("UPDATE devices SET revoked=1,invite_hash=NULL,token_hash=NULL,sub_token_hash=NULL,sub_token_enc=NULL,sub_active=0,closed_reason='Ссылка закрыта',closed_at=? WHERE id=? AND revoked=0",
+			time.Now().Unix(), r.PathValue("id")))
+	})
+	if !report(w, err) {
+		w.WriteHeader(204)
+	}
+}
+
+func (s *server) ensureDeviceSubLink(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var sealed []byte
+	var revoked bool
+	err := s.db.QueryRow("SELECT sub_token_enc,revoked=1 FROM devices WHERE id=?", id).Scan(&sealed, &revoked)
+	if errors.Is(err, sql.ErrNoRows) {
+		fail(w, 404, "not_found")
+		return
+	}
+	if report(w, err) {
+		return
+	}
+	if revoked {
+		fail(w, 409, "device_revoked")
+		return
+	}
+	if len(sealed) > 0 {
+		if raw, err := s.secrets.Open(nil, nil, sealed, []byte(id)); err == nil && len(raw) > 0 {
+			send(w, 200, obj{"subUrl": s.subURL(string(raw))})
+			return
+		}
+	}
+	subToken := randomToken()
+	subEnc := s.secrets.Seal(nil, nil, []byte(subToken), []byte(id))
+	err = s.mutate("device.sub_link", false, func(tx *sql.Tx, _ int64) error {
+		return affected(tx.Exec("UPDATE devices SET sub_token_hash=?,sub_token_enc=? WHERE id=? AND revoked=0", digest(subToken), subEnc, id))
+	})
+	if !report(w, err) {
+		send(w, 200, obj{"subUrl": s.subURL(subToken)})
+	}
+}
+
+func (s *server) deviceAccess(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		AccessEnabled bool
+	}
+	if !decode(w, r, &input) {
+		return
+	}
+	err := s.mutate("device.access_updated", true, func(tx *sql.Tx, _ int64) error {
+		return affected(tx.Exec("UPDATE devices SET access_enabled=? WHERE id=? AND revoked=0", input.AccessEnabled, r.PathValue("id")))
+	})
+	if !report(w, err) {
+		w.WriteHeader(204)
+	}
+}
+
+func (s *server) clearDeviceHistory(w http.ResponseWriter, _ *http.Request) {
+	err := s.mutate("device.history_cleared", false, func(tx *sql.Tx, _ int64) error {
+		_, err := tx.Exec("DELETE FROM devices WHERE revoked=1 OR (access_expires>0 AND access_expires<=?)", time.Now().Unix())
+		return err
 	})
 	if !report(w, err) {
 		w.WriteHeader(204)
@@ -603,7 +760,8 @@ func (s *server) config(w http.ResponseWriter, r *http.Request) {
 	}
 	result := obj{
 		"api": 1, "deviceId": d.id, "revision": rev, "rules": policies,
-		"groups": filterGroupEntries(groups, d.transport, android),
+		"groups":        filterGroupEntries(groups, d.transport, android),
+		"canEditGlobal": d.canEditGlobal,
 	}
 	if d.transport == "agent" {
 		paused, err := clientUpdatesPaused(tx)
@@ -684,12 +842,16 @@ func (s *server) state(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback()
 	data := obj{}
 	queries := map[string]string{
-		"users":   "SELECT id,name FROM users ORDER BY name",
+		"users":   "SELECT id,name,can_edit_global AS canEditGlobal FROM users ORDER BY name",
 		"proxies": "SELECT id,name,host,port,tls,headers FROM proxies ORDER BY name",
 		"routes":  "SELECT user_id AS userId,proxy_id AS proxyId,priority FROM routes ORDER BY user_id,priority",
 		"devices": `SELECT d.id,d.user_id AS userId,d.label,d.transport,d.ack_revision AS ackRevision,d.seen,d.expires,
-			COALESCE(r.platform,'') AS platform,COALESCE(r.version,'') AS installedVersion,COALESCE(r.reported_at,0) AS reportedAt,
-			CASE WHEN d.revoked=1 THEN 'revoked' WHEN d.token_hash IS NOT NULL THEN 'connected' ELSE 'invited' END AS status
+			d.link_type AS linkType,d.link_duration_sec AS linkDurationSec,d.access_expires AS accessExpires,
+			d.access_enabled AS accessEnabled,d.can_edit_global AS canEditGlobal,d.closed_reason AS closedReason,
+			d.closed_at AS closedAt,d.universal,d.sub_active AS subActive,d.sub_token_enc AS subTokenEnc,
+			CASE WHEN COALESCE(r.platform,'')<>'' THEN r.platform WHEN d.sub_active=1 AND d.token_hash IS NULL THEN 'ios' ELSE '' END AS platform,
+			COALESCE(r.version,'') AS installedVersion,COALESCE(r.reported_at,0) AS reportedAt,
+			CASE WHEN d.revoked=1 THEN 'revoked' WHEN d.token_hash IS NOT NULL OR d.sub_active=1 THEN 'connected' ELSE 'invited' END AS status
 			FROM devices d LEFT JOIN device_reports r ON r.device_id=d.id ORDER BY d.seen DESC,d.label`,
 		"audit": "SELECT revision,event,time FROM audit ORDER BY revision DESC LIMIT 100",
 	}
@@ -699,6 +861,12 @@ func (s *server) state(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		data[k] = value
+	}
+	if users, ok := data["users"].([]obj); ok {
+		for _, u := range users {
+			v, _ := u["canEditGlobal"].(int64)
+			u["canEditGlobal"] = v == 1
+		}
 	}
 	if proxies, ok := data["proxies"].([]obj); ok {
 		for _, p := range proxies {
@@ -713,9 +881,26 @@ func (s *server) state(w http.ResponseWriter, r *http.Request) {
 			id, _ := d["id"].(string)
 			status, _ := d["status"].(string)
 			seen, _ := d["seen"].(int64)
+			accessExpires, _ := d["accessExpires"].(int64)
+			accessEnabled, _ := d["accessEnabled"].(int64)
+			canEditGlobal, _ := d["canEditGlobal"].(int64)
+			universal, _ := d["universal"].(int64)
+			subActive, _ := d["subActive"].(int64)
+			expired := status != "revoked" && accessExpires > 0 && accessExpires <= now
+			d["accessEnabled"] = accessEnabled == 1
+			d["canEditGlobal"] = canEditGlobal == 1
+			d["universal"] = universal == 1
+			d["subActive"] = subActive == 1
+			d["expired"] = expired
+			if sealed, ok := d["subTokenEnc"].([]byte); ok && len(sealed) > 0 && status != "revoked" {
+				if raw, err := s.secrets.Open(nil, nil, sealed, []byte(id)); err == nil && len(raw) > 0 {
+					d["subUrl"] = s.subURL(string(raw))
+				}
+			}
+			delete(d, "subTokenEnc")
 			conns := active[id]
 			d["activeConnections"] = conns
-			d["online"] = status == "connected" && (conns > 0 || (seen > 0 && now-seen <= 90))
+			d["online"] = status == "connected" && accessEnabled == 1 && !expired && (conns > 0 || (seen > 0 && now-seen <= 90))
 		}
 	}
 	data["revision"], err = revision(tx)

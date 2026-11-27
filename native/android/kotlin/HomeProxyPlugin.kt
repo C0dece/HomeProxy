@@ -35,16 +35,15 @@ class HomeProxyPlugin(private val activity: Activity) : Plugin(activity) {
         MobileRuntime.worker.execute {
             try {
                 if (request.command == "enable" && args.getBoolean("enabled")) {
-                    MobileRuntime.requireLinked(app)
+                    MobileRuntime.requireReady(app)
                     activity.runOnUiThread {
                         val approval = VpnService.prepare(activity)
                         if (approval == null) startVpn(invoke)
                         else startActivityForResult(invoke, approval, "vpnPermission")
                     }
                 } else if (request.command == "quick-mode" && args.optString("mode") != "off") {
-                    val mode = args.getString("mode")
-                    MobileRuntime.requireLinked(app)
-                    MobileRuntime.applyQuickMode(app, mode)
+                    MobileRuntime.requireReady(app)
+                    MobileRuntime.applyQuickMode(app, args)
                     if (MobileRuntime.isVpnRunning()) {
                         invoke.resolve(JSObject(MobileRuntime.status(app).toString()))
                     } else {

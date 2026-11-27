@@ -1,10 +1,21 @@
 import type { Rule, ServiceGroup } from '../../../packages/shared/models'
 
-export type User = { id: string; name: string }
-export type Proxy = User & { host: string; port: number; tls: number; headers?: Record<string, string> }
+export type User = { id: string; name: string; canEditGlobal?: boolean }
+export type Proxy = { id: string; name: string; host: string; port: number; tls: number; headers?: Record<string, string> }
 export type Device = {
   id: string; userId: string; label: string; transport: string; ackRevision: number; status: string; seen: number; expires: number
-  platform?: 'windows' | 'android' | 'browser' | ''
+  linkType?: 'permanent' | 'temp'
+  linkDurationSec?: number
+  accessExpires?: number
+  accessEnabled?: boolean
+  expired?: boolean
+  closedReason?: string
+  closedAt?: number
+  canEditGlobal?: boolean
+  universal?: boolean
+  subUrl?: string
+  subActive?: boolean
+  platform?: 'windows' | 'android' | 'browser' | 'ios' | ''
   installedVersion?: string
   reportedAt?: number
   online?: boolean
@@ -44,6 +55,7 @@ const errors: Record<string, string> = {
   invalid_name: 'Укажите имя пользователя.',
   rule_conflict: 'Пока вы редактировали правило, оно изменилось. Обновите панель.',
   group_conflict: 'Пока вы редактировали группу, она изменилась. Обновите панель.',
+  forbidden_group: 'Недостаточно прав для изменения общих ресурсов.',
   not_found: 'Запись не найдена. Обновите панель.'
 }
 

@@ -61,7 +61,36 @@ pub fn running() -> Result<Vec<Application>, String> {
     Ok(apps.into_values().collect())
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 pub fn running() -> Result<Vec<Application>, String> {
-    Err("Список приложений доступен на Windows".into())
+    use std::collections::BTreeMap;
+    let mut apps = BTreeMap::new();
+    let entries =
+        std::fs::read_dir("/proc").map_err(|_| "Не удалось прочитать список приложений")?;
+    for entry in entries.flatten() {
+        let fname = entry.file_name();
+        let Some(pid) = fname.to_str() else { continue };
+        if !pid.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(target) = std::fs::read_link(entry.path().join("exe")) else {
+            continue;
+        };
+        let path = target.to_string_lossy().into_owned();
+        let name = target
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+        if !name.is_empty() {
+            let key = (name.to_lowercase(), path.to_lowercase());
+            apps.entry(key).or_insert(Application { name, path });
+        }
+    }
+    Ok(apps.into_values().collect())
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+pub fn running() -> Result<Vec<Application>, String> {
+    Err("Список приложений доступен на Windows и Linux".into())
 }

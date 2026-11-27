@@ -228,7 +228,7 @@ func run() error {
 	platform := flag.String("platform", runtime.GOOS, "target operating system")
 	arch := flag.String("arch", runtime.GOARCH, "target architecture")
 	api := flag.Int("api", 1, "required API version")
-	schema := flag.Int("db-schema", 3, "required database schema")
+	schema := flag.Int("db-schema", 5, "required database schema")
 	apply := flag.Bool("apply-service", false, "install a verified release into the local HomeProxyServer service")
 	recoverUpdate := flag.Bool("recover-service", false, "restore the previous version after an interrupted local update")
 	flag.Parse()

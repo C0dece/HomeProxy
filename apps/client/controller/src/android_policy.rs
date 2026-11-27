@@ -1,5 +1,6 @@
 use crate::policy::{
-    generate, parse_web, tun_dns, Action, Configuration, Ports, Profile, ProxyListen, Rule,
+    generate, generate_custom, parse_web, tun_dns, Action, Configuration, CustomProxy, Ports,
+    Profile, ProxyListen, Rule, ServiceGroup,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -7,9 +8,15 @@ use serde_json::{json, Value};
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct MobileConfig {
-    remote: Configuration,
+    remote: Option<Configuration>,
     #[serde(default)]
     local: Vec<Rule>,
+    #[serde(default)]
+    local_groups: Vec<ServiceGroup>,
+    #[serde(default)]
+    config_mode: String,
+    #[serde(default)]
+    custom_proxy: Option<CustomProxy>,
     #[serde(default)]
     excluded_apps: Vec<String>,
     profile: Profile,
@@ -24,19 +31,12 @@ struct MobileConfig {
 pub fn render(raw: &str) -> Result<Value, String> {
     let mut input: MobileConfig =
         serde_json::from_str(raw).map_err(|_| "Некорректная конфигурация VPN")?;
-    parse_web(&input.remote.probe_url, input.debug_loopback)?;
-    if input.remote.api != 1 || input.remote.revision == 0 || input.remote.proxies.len() > 16 {
-        return Err("Несовместимая конфигурация VPN".into());
-    }
-    input.remote.rules.retain(|rule| rule.kind != "process");
-    for rule in input.remote.rules.iter_mut().chain(&mut input.local) {
+    for rule in &mut input.local {
         rule.normalize()?;
     }
-    for group in &mut input.remote.groups {
+    for group in &mut input.local_groups {
         group.entries.retain(|entry| entry.kind != "process");
-        for entry in &mut group.entries {
-            entry.normalize()?;
-        }
+        group.validate()?;
     }
     let ports = Ports {
         proxy: 0,
@@ -44,21 +44,56 @@ pub fn render(raw: &str) -> Result<Value, String> {
         control: input.control_port,
         listen: ProxyListen::default(),
     };
-    let generated = generate(
-        &input.remote,
-        &input.local,
-        input.profile,
-        input.custom,
-        &ports,
-        &input.secret,
-    );
+    let mut has_locked = false;
+    let generated = if input.config_mode == "custom" {
+        let mut cp = input
+            .custom_proxy
+            .ok_or("Укажите параметры своего прокси")?;
+        cp.validate()?;
+        generate_custom(
+            &cp,
+            &input.local_groups,
+            &input.local,
+            input.profile,
+            input.custom,
+            &ports,
+            &input.secret,
+        )
+    } else {
+        let mut remote = input.remote.ok_or("Некорректная конфигурация VPN")?;
+        parse_web(&remote.probe_url, input.debug_loopback)?;
+        if remote.api != 1 || remote.revision == 0 || remote.proxies.len() > 16 {
+            return Err("Несовместимая конфигурация VPN".into());
+        }
+        remote.rules.retain(|rule| rule.kind != "process");
+        for rule in &mut remote.rules {
+            rule.normalize()?;
+        }
+        for group in &mut remote.groups {
+            group.entries.retain(|entry| entry.kind != "process");
+            for entry in &mut group.entries {
+                entry.normalize()?;
+            }
+        }
+        has_locked = remote.rules.iter().any(|rule| rule.locked)
+            || remote.groups.iter().any(|group| group.locked);
+        generate(
+            &remote,
+            &input.local_groups,
+            &input.local,
+            input.profile,
+            input.custom,
+            &ports,
+            &input.secret,
+        )
+    };
     let mut config = generated.config;
     let mut tun = json!({
         "type": "tun", "tag": "vpn",
         "address": ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
         "mtu": 1500, "auto_route": true, "strict_route": true, "stack": "gvisor"
     });
-    if !input.excluded_apps.is_empty() && !input.remote.rules.iter().any(|rule| rule.locked) {
+    if !input.excluded_apps.is_empty() && !has_locked {
         tun["exclude_package"] = json!(input.excluded_apps);
     }
     let inbounds = config["inbounds"]
@@ -160,5 +195,43 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn custom_mode_and_local_groups_render_valid_tun_config() {
+        let fixture = json!({
+            "configMode": "custom",
+            "customProxy": {
+                "protocol": "SOCKS5",
+                "host": "127.0.0.1",
+                "port": 1080,
+                "username": "u",
+                "password": "p"
+            },
+            "localGroups": [{
+                "id": "lg1",
+                "name": "YouTube",
+                "action": "PROXY",
+                "enabled": true,
+                "entries": [
+                    {"kind": "package", "pattern": "com.google.android.youtube", "enabled": true},
+                    {"kind": "suffix", "pattern": "youtube.com", "enabled": true}
+                ]
+            }],
+            "profile": "DIRECT_INTERNET",
+            "custom": "PROXY",
+            "probePort": 5973,
+            "controlPort": 5974,
+            "secret": "fixture",
+            "debugLoopback": true
+        });
+        let result = render(&fixture.to_string()).unwrap();
+        let rules = result["config"]["route"]["rules"].as_array().unwrap();
+        assert!(rules
+            .iter()
+            .any(|r| r["package_name"] == json!(["com.google.android.youtube"])));
+        assert!(rules
+            .iter()
+            .any(|r| r["domain_suffix"] == json!(["youtube.com"])));
     }
 }

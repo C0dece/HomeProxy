@@ -40,7 +40,7 @@ var migrations embed.FS
 var bundledAdmin fs.FS
 
 const apiVersion = 1
-const schemaVersion = 3
+const schemaVersion = 5
 
 var releaseVersion = "0.1.2"
 
@@ -320,11 +320,14 @@ func start(cfg settings, adminToken string) (*server, error) {
 }
 
 func (s *server) clientRoutes(r *http.ServeMux) {
+	r.HandleFunc("GET /api/sub/singbox", s.subSingbox)
 	r.HandleFunc("POST /api/v1/connect", s.connect)
 	r.HandleFunc("GET /api/v1/config", s.config)
 	r.HandleFunc("POST /api/v1/ack", s.ack)
 	r.HandleFunc("PUT /api/v1/personal-rules", s.personalRule)
 	r.HandleFunc("DELETE /api/v1/personal-rules/{id}", s.deletePersonalRule)
+	r.HandleFunc("PUT /api/v1/shared-groups", s.clientSaveGroup)
+	r.HandleFunc("DELETE /api/v1/shared-groups/{id}", s.clientDeleteGroup)
 	r.HandleFunc("GET /connect", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		fmt.Fprintln(w, "Скопируйте ссылку целиком и вставьте в HomeProxy.")
@@ -371,11 +374,15 @@ func (s *server) adminRoutes(r *http.ServeMux) {
 	r.HandleFunc("PUT /api/v1/admin/client-update-policy", s.admin(s.clientUpdatePolicy))
 	r.HandleFunc("POST /api/v1/admin/users", s.admin(s.user))
 	r.HandleFunc("PUT /api/v1/admin/users/{id}", s.admin(s.user))
+	r.HandleFunc("PUT /api/v1/admin/users/{id}/permissions", s.admin(s.userPermissions))
 	r.HandleFunc("DELETE /api/v1/admin/users/{id}", s.admin(s.deleteUser))
 	r.HandleFunc("PUT /api/v1/admin/proxies", s.admin(s.proxy))
 	r.HandleFunc("DELETE /api/v1/admin/proxies/{id}", s.admin(s.deleteProxy))
 	r.HandleFunc("PUT /api/v1/admin/routes", s.admin(s.routes))
 	r.HandleFunc("POST /api/v1/admin/invites", s.admin(s.invite))
+	r.HandleFunc("POST /api/v1/admin/devices/{id}/sub-link", s.admin(s.ensureDeviceSubLink))
+	r.HandleFunc("PUT /api/v1/admin/devices/{id}/access", s.admin(s.deviceAccess))
+	r.HandleFunc("DELETE /api/v1/admin/devices/history", s.admin(s.clearDeviceHistory))
 	r.HandleFunc("DELETE /api/v1/admin/devices/{id}", s.admin(s.revoke))
 	r.HandleFunc("PUT /api/v1/admin/rules", s.admin(s.adminRule))
 	r.HandleFunc("DELETE /api/v1/admin/rules/{id}", s.admin(s.deleteRule))
@@ -397,7 +404,7 @@ func secureHeaders(handler http.Handler) http.Handler {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; style-src 'self' 'unsafe-inline'")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; style-src 'self' 'unsafe-inline'")
 		if req.TLS != nil {
 			w.Header().Set("Strict-Transport-Security", "max-age=31536000")
 		}

@@ -17,8 +17,8 @@ use tiny_http::{Header, Request, Server};
 use crate::{
     engine::Engine,
     policy::{
-        effective_rules, generate, parse_web, Action, Configuration, Ports, Profile, ProxyListen,
-        Rule,
+        effective_rules, generate, generate_custom, parse_web, Action, Configuration, CustomProxy,
+        Ports, Profile, ProxyListen, Rule, ServiceGroup,
     },
     random_token, secure, windows_tun,
 };
@@ -41,6 +41,14 @@ struct Enrollment {
     key: String,
 }
 
+fn default_config_mode() -> String {
+    "subscription".into()
+}
+
+fn default_base_route() -> String {
+    "direct".into()
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 struct Stored {
@@ -48,12 +56,19 @@ struct Stored {
     remote: Option<Configuration>,
     previous_ack: u64,
     local: Vec<Rule>,
+    local_groups: Vec<ServiceGroup>,
     queue: Vec<Rule>,
     delete_queue: Vec<String>,
     profile: Profile,
     custom: Action,
     enabled: bool,
     proxy_listen: ProxyListen,
+    #[serde(default = "default_config_mode")]
+    config_mode: String,
+    custom_proxy: Option<CustomProxy>,
+    routing_mode: String,
+    #[serde(default = "default_base_route")]
+    auto_base_route: String,
 }
 
 pub fn updates_paused(directory: &Path) -> Result<bool, String> {
@@ -76,12 +91,17 @@ impl Default for Stored {
             remote: None,
             previous_ack: 0,
             local: Vec::new(),
+            local_groups: Vec::new(),
             queue: Vec::new(),
             delete_queue: Vec::new(),
             profile: Profile::Auto,
             custom: Action::Proxy,
             enabled: true,
             proxy_listen: ProxyListen::default(),
+            config_mode: default_config_mode(),
+            custom_proxy: None,
+            routing_mode: String::new(),
+            auto_base_route: default_base_route(),
         }
     }
 }
@@ -266,9 +286,9 @@ pub fn serve(options: Options) -> Result<(), String> {
         }
         if Instant::now() >= next_probe {
             if ctl.state.enabled {
-                if let Some(config) = &ctl.state.remote {
+                if let Some(probe_url) = ctl.active_probe_url() {
                     let result = if ctl.engine.alive() {
-                        ctl.engine.probe(&config.probe_url)
+                        ctl.engine.probe(&probe_url)
                     } else {
                         ctl.apply(&ctl.state.clone(), false)
                     };
@@ -291,7 +311,10 @@ fn prepare_tun_handoff(options: &Options) -> Result<(), String> {
     }
     let request = |command| crate::control(&options.directory, options.port, command, &Value::Null);
     let status = request("status")?;
-    if status["tun"] != false || status["linked"] != true || status["revision"].is_null() {
+    if status["tun"] != false
+        || (status["linked"] != true && status["configMode"] != "custom")
+        || (status["linked"] == true && status["revision"].is_null())
+    {
         return Err(
             "Для запуска TUN подключите локальный Agent и дождитесь получения настроек".into(),
         );
@@ -335,13 +358,63 @@ impl Controller {
             .map_err(|_| "Не удалось записать защищённую конфигурацию".into())
     }
 
+    fn active_probe_url(&self) -> Option<String> {
+        if self.state.config_mode == "custom" {
+            self.state.custom_proxy.as_ref().map(|_| {
+                self.state
+                    .remote
+                    .as_ref()
+                    .map(|r| r.probe_url.clone())
+                    .unwrap_or_else(|| "https://cp.cloudflare.com/generate_204".into())
+            })
+        } else {
+            self.state.remote.as_ref().map(|r| r.probe_url.clone())
+        }
+    }
+
     fn apply(&mut self, state: &Stored, verify: bool) -> Result<(), String> {
         let mut ports = self.ports.clone();
         ports.listen = state.proxy_listen.clone();
         ports.proxy = ports.listen.port;
-        if let Some(remote) = state.remote.as_ref().filter(|_| state.enabled) {
+        if state.enabled && state.config_mode == "custom" {
+            if let Some(cp) = &state.custom_proxy {
+                let mut generated = generate_custom(
+                    cp,
+                    &state.local_groups,
+                    &state.local,
+                    state.profile,
+                    state.custom,
+                    &ports,
+                    &self.engine_token,
+                );
+                if self.options.tun {
+                    let scheme = if cp.tls { "https" } else { "http" };
+                    let origin = Url::parse(&format!("{scheme}://{}:{}", cp.host, cp.port))
+                        .map_err(|_| "Неверный адрес прокси для TUN")?;
+                    let executable = std::env::current_exe()
+                        .map_err(|_| "Не удалось определить путь контроллера")?;
+                    windows_tun::configure(
+                        &mut generated.config,
+                        state.profile,
+                        state.custom,
+                        &origin,
+                        &executable,
+                        self.options.strict,
+                    )?;
+                }
+                let probe_url = state
+                    .remote
+                    .as_ref()
+                    .map(|r| r.probe_url.as_str())
+                    .unwrap_or("https://cp.cloudflare.com/generate_204");
+                self.engine.replace(generated, probe_url, verify)?;
+            } else {
+                self.engine.clear();
+            }
+        } else if let Some(remote) = state.remote.as_ref().filter(|_| state.enabled) {
             let mut generated = generate(
                 remote,
+                &state.local_groups,
                 &state.local,
                 state.profile,
                 state.custom,
@@ -450,6 +523,7 @@ impl Controller {
         }
         let mut next = self.state.clone();
         next.enrollment = Some(enrollment);
+        next.config_mode = "subscription".into();
         self.commit(next, false)?;
         self.sync_now();
         Ok(())
@@ -616,6 +690,27 @@ impl Controller {
 
     fn status(&mut self) -> Value {
         let remote = self.state.remote.as_ref();
+        let routing_mode = if !self.state.enabled {
+            "off"
+        } else if self.state.routing_mode == "auto" || self.state.routing_mode == "all" {
+            self.state.routing_mode.as_str()
+        } else if self.state.profile == Profile::DirectInternet
+            || (self.state.profile == Profile::Custom && self.state.custom == Action::LocalDirect)
+        {
+            "auto"
+        } else {
+            "all"
+        };
+        let auto_base_route = if self.state.auto_base_route == "proxy" {
+            "proxy"
+        } else {
+            "direct"
+        };
+        let config_mode = if self.state.config_mode == "custom" {
+            "custom"
+        } else {
+            "subscription"
+        };
         json!({
             "linked": self.state.enrollment.is_some(),
             "online": self.online,
@@ -626,6 +721,19 @@ impl Controller {
             "routingActive": self.engine.alive(),
             "revision": remote.map(|r| r.revision),
             "clientUpdatesPaused": remote.is_some_and(|r| r.client_updates_paused),
+            "canEditGlobal": remote.is_some_and(|r| r.can_edit_global),
+            "configMode": config_mode,
+            "customProxy": self.state.custom_proxy.as_ref().map(|cp| json!({
+                "protocol": cp.protocol,
+                "host": cp.host,
+                "port": cp.port,
+                "username": cp.username,
+                "hasPassword": !cp.password.is_empty(),
+                "tls": cp.tls,
+                "serverName": cp.server_name,
+            })),
+            "routingMode": routing_mode,
+            "autoBaseRoute": auto_base_route,
             "ack": self.state.previous_ack,
             "proxyPort": self.ports.proxy,
             "proxyListen": {
@@ -638,6 +746,7 @@ impl Controller {
             "custom": self.state.custom,
             "error": self.last_error,
             "rules": self.state.local,
+            "localGroups": self.state.local_groups,
             "remoteRules": remote.map(|r| &r.rules),
             "remoteGroups": remote.map(|r| &r.groups),
             "pending": self.state.queue,
@@ -657,7 +766,9 @@ impl Controller {
             "disconnect" => {
                 next = Stored {
                     local: next.local,
+                    local_groups: next.local_groups,
                     proxy_listen: next.proxy_listen,
+                    custom_proxy: next.custom_proxy,
                     ..Stored::default()
                 };
                 self.commit(next, false)?;
@@ -666,28 +777,159 @@ impl Controller {
             }
             "sync" => self.sync_now(),
             "probe" => {
-                if let Some(c) = &self.state.remote {
-                    self.engine.probe(&c.probe_url)?;
+                if let Some(url) = self.active_probe_url() {
+                    self.engine.probe(&url)?;
                 }
             }
             "enable" => {
                 next.enabled = data["enabled"].as_bool().ok_or("Укажите состояние")?;
+                if next.enabled && next.routing_mode == "off" {
+                    next.routing_mode = "auto".into();
+                }
                 self.commit(next, false)?;
             }
             "quick-mode" => {
+                if let Some(base) = data["baseRoute"].as_str() {
+                    if base != "direct" && base != "proxy" {
+                        return Err("Неверный базовый маршрут".into());
+                    }
+                    next.auto_base_route = base.into();
+                }
                 match data["mode"].as_str().unwrap_or_default() {
-                    "off" => next.enabled = false,
-                    "rules" => {
+                    "off" => {
+                        next.enabled = false;
+                        next.routing_mode = "off".into();
+                    }
+                    "rules" | "auto" => {
                         next.enabled = true;
-                        next.profile = Profile::DirectInternet;
+                        next.routing_mode = "auto".into();
+                        next.profile = if next.auto_base_route == "proxy" {
+                            Profile::Auto
+                        } else {
+                            Profile::DirectInternet
+                        };
                     }
                     "all" => {
                         next.enabled = true;
+                        next.routing_mode = "all".into();
                         next.profile = Profile::Auto;
                     }
                     _ => return Err("Неверный быстрый режим".into()),
                 }
                 self.commit(next, false)?;
+            }
+            "set-config-mode" => {
+                let mode = data["mode"].as_str().unwrap_or_default();
+                if mode != "subscription" && mode != "custom" {
+                    return Err("Неверный источник конфигурации".into());
+                }
+                next.config_mode = mode.into();
+                self.commit(next, false)?;
+            }
+            "save-custom-proxy" => {
+                let keep_password = data["keepPassword"].as_bool().unwrap_or(false);
+                let mut cp: CustomProxy = serde_json::from_value(data.clone())
+                    .map_err(|_| "Неверные параметры прокси")?;
+                if keep_password && cp.password.is_empty() {
+                    if let Some(prev) = &self.state.custom_proxy {
+                        cp.password = prev.password.clone();
+                    }
+                }
+                cp.validate()?;
+                next.custom_proxy = Some(cp);
+                next.config_mode = "custom".into();
+                self.commit(next, false)?;
+            }
+            "select-proxy" => {
+                let tag = data["tag"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .ok_or("Укажите выходной узел")?;
+                self.engine.select_candidate(tag)?;
+            }
+            "save-local-group" => {
+                let mut group: ServiceGroup =
+                    serde_json::from_value(data.clone()).map_err(|_| "Неверная группа ресурсов")?;
+                group.validate()?;
+                group.locked = false;
+                group.user_id.clear();
+                group.revision = 0;
+                if group.id.is_empty() {
+                    group.id = random_token()?;
+                }
+                if let Some(pos) = next.local_groups.iter().position(|g| g.id == group.id) {
+                    next.local_groups[pos] = group;
+                } else {
+                    next.local_groups
+                        .retain(|g| !g.name.eq_ignore_ascii_case(&group.name));
+                    next.local_groups.insert(0, group);
+                }
+                self.commit(next, false)?;
+            }
+            "delete-local-group" => {
+                let id = data["id"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .ok_or("Укажите идентификатор группы")?;
+                next.local_groups.retain(|g| g.id != id);
+                self.commit(next, false)?;
+            }
+            "save-shared-group" => {
+                let Some(e) = next.enrollment.clone() else {
+                    return Err("Сначала подключите подписку".into());
+                };
+                let mut group: ServiceGroup =
+                    serde_json::from_value(data.clone()).map_err(|_| "Неверная группа ресурсов")?;
+                group.validate()?;
+                group.locked = false;
+                let response = self
+                    .http
+                    .put(Self::endpoint(&e, "shared-groups")?)
+                    .bearer_auth(&e.key)
+                    .json(&group)
+                    .send()
+                    .map_err(|_| "Сервер недоступен. Общие ресурсы сейчас нельзя изменить")?;
+                if response.status() == StatusCode::FORBIDDEN {
+                    return Err("Нет прав на изменение общих ресурсов".into());
+                }
+                if response.status() == StatusCode::CONFLICT {
+                    return Err("Конфликт версии ресурса. Обновите конфигурацию с сервера".into());
+                }
+                if !response.status().is_success() {
+                    return Err("Сервер отклонил сохранение общего ресурса".into());
+                }
+                self.sync_now();
+                if let Some(err) = &self.last_error {
+                    return Err(err.clone());
+                }
+            }
+            "delete-shared-group" => {
+                let Some(e) = next.enrollment.clone() else {
+                    return Err("Сначала подключите подписку".into());
+                };
+                let id = data["id"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .ok_or("Укажите идентификатор группы")?;
+                let response = self
+                    .http
+                    .delete(Self::endpoint(&e, &format!("shared-groups/{id}"))?)
+                    .bearer_auth(&e.key)
+                    .send()
+                    .map_err(|_| "Сервер недоступен. Общие ресурсы сейчас нельзя изменить")?;
+                if response.status() == StatusCode::FORBIDDEN {
+                    return Err("Нет прав на изменение общих ресурсов".into());
+                }
+                if !response.status().is_success() && response.status() != StatusCode::NOT_FOUND {
+                    return Err("Сервер отклонил удаление общего ресурса".into());
+                }
+                self.sync_now();
+                if let Some(err) = &self.last_error {
+                    return Err(err.clone());
+                }
             }
             "proxy-settings" => {
                 let bind = data["bind"]
@@ -806,36 +1048,47 @@ impl Controller {
                     .replace('/', "\\")
                     .to_lowercase();
                 let app_name = executable.rsplit('\\').next().unwrap_or("");
-                let remote = self
-                    .state
-                    .remote
-                    .as_ref()
-                    .map(|cfg| cfg.rules.as_slice())
-                    .unwrap_or(&[]);
-                let remote_groups = self
-                    .state
-                    .remote
-                    .as_ref()
-                    .map(|cfg| cfg.groups.as_slice())
-                    .unwrap_or(&[]);
+                let remote = if self.state.config_mode == "custom" {
+                    &[]
+                } else {
+                    self.state
+                        .remote
+                        .as_ref()
+                        .map(|cfg| cfg.rules.as_slice())
+                        .unwrap_or(&[])
+                };
+                let remote_groups = if self.state.config_mode == "custom" {
+                    &[]
+                } else {
+                    self.state
+                        .remote
+                        .as_ref()
+                        .map(|cfg| cfg.groups.as_slice())
+                        .unwrap_or(&[])
+                };
                 let host_ip = host.parse::<std::net::IpAddr>().ok();
-                let rule = effective_rules(remote, remote_groups, &self.state.local)
-                    .into_iter()
-                    .find(|r| match r.kind.as_str() {
-                        "process" => {
-                            r.pattern == executable
-                                || (!r.pattern.contains('\\') && r.pattern == app_name)
-                        }
-                        "domain" => r.pattern == host,
-                        "suffix" => {
-                            r.pattern == host
-                                || host
-                                    .strip_suffix(&r.pattern)
-                                    .is_some_and(|prefix| prefix.ends_with('.'))
-                        }
-                        "ip_cidr" => host_ip.is_some_and(|ip| cidr_contains(&r.pattern, ip)),
-                        _ => false,
-                    });
+                let rule = effective_rules(
+                    remote,
+                    remote_groups,
+                    &self.state.local_groups,
+                    &self.state.local,
+                )
+                .into_iter()
+                .find(|r| match r.kind.as_str() {
+                    "process" => {
+                        r.pattern == executable
+                            || (!r.pattern.contains('\\') && r.pattern == app_name)
+                    }
+                    "domain" => r.pattern == host,
+                    "suffix" => {
+                        r.pattern == host
+                            || host
+                                .strip_suffix(&r.pattern)
+                                .is_some_and(|prefix| prefix.ends_with('.'))
+                    }
+                    "ip_cidr" => host_ip.is_some_and(|ip| cidr_contains(&r.pattern, ip)),
+                    _ => false,
+                });
                 let mut action = rule.as_ref().map(|r| r.action).unwrap_or(Action::Auto);
                 if action == Action::Auto {
                     action = match self.state.profile {
@@ -844,6 +1097,28 @@ impl Controller {
                         _ => Action::Proxy,
                     };
                 }
+                let group_name = rule.as_ref().and_then(|matched| {
+                    if !matched.id.is_empty() {
+                        remote_groups
+                            .iter()
+                            .find(|g| g.id == matched.id)
+                            .map(|g| g.name.clone())
+                    } else {
+                        self.state
+                            .local_groups
+                            .iter()
+                            .find(|g| {
+                                g.enabled
+                                    && g.action == matched.action
+                                    && g.entries.iter().any(|e| {
+                                        e.enabled
+                                            && e.kind == matched.kind
+                                            && e.pattern == matched.pattern
+                                    })
+                            })
+                            .map(|g| g.name.clone())
+                    }
+                });
                 let scope = rule
                     .as_ref()
                     .map(|r| {
@@ -858,9 +1133,13 @@ impl Controller {
                         }
                     })
                     .unwrap_or("DEFAULT");
-                return Ok(
-                    json!({"action": action, "scope": scope, "rule": rule, "route": self.engine.status()}),
-                );
+                return Ok(json!({
+                    "action": action,
+                    "scope": scope,
+                    "rule": rule,
+                    "groupName": group_name,
+                    "route": self.engine.status()
+                }));
             }
             _ => return Err("Неизвестная команда".into()),
         }

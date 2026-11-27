@@ -13,6 +13,10 @@ param(
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 $project = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+if (!$Version -and (Test-Path -LiteralPath (Join-Path $project 'VERSION'))) {
+    $Version = (Get-Content -LiteralPath (Join-Path $project 'VERSION') -Raw).Trim()
+    if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid version in VERSION file: $Version" }
+}
 $keystore = if ($SigningKeystore) { (Resolve-Path -LiteralPath $SigningKeystore).Path }
 if ($keystore -and (!$env:HOMEPROXY_ANDROID_KEY_PASSWORD -or !$Version)) {
     throw 'Set HOMEPROXY_ANDROID_KEY_PASSWORD and Version to sign an Android release.'

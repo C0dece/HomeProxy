@@ -93,9 +93,14 @@ async fn start_agent() -> Result<(), String> {
 
 #[cfg(not(target_os = "android"))]
 fn agent_binary() -> Result<std::path::PathBuf, String> {
+    let name = if cfg!(windows) {
+        "homeproxy-agent.exe"
+    } else {
+        "homeproxy-agent"
+    };
     Ok(std::env::current_exe()
         .map_err(|_| "Не удалось определить папку приложения")?
-        .with_file_name("homeproxy-agent.exe"))
+        .with_file_name(name))
 }
 
 #[cfg(not(target_os = "android"))]
@@ -160,7 +165,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 
     let open = MenuItemBuilder::with_id("open", "Открыть HomeProxy").build(app)?;
     let mode_off = MenuItemBuilder::with_id("mode_off", "Выкл").build(app)?;
-    let mode_rules = MenuItemBuilder::with_id("mode_rules", "Авто (правила)").build(app)?;
+    let mode_rules = MenuItemBuilder::with_id("mode_rules", "Авто").build(app)?;
     let mode_all = MenuItemBuilder::with_id("mode_all", "Весь трафик").build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "Выход").build(app)?;
     let menu = MenuBuilder::new(app)
